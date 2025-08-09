@@ -10,7 +10,7 @@ import ScenarioAnalysis from './components/ScenarioAnalysis';
 import Icon from '../../components/AppIcon';
 import Button from '../../components/ui/Button';
 import { useAuth } from '../../contexts/AuthContext';
-import { arbitrageService, venueService, subscriptionService } from '../../utils/supabaseServices';
+import { arbitrageService, venueService, subscriptionService, healthService } from '../../utils/backendServices';
 
 const ArbitrageCalculator = () => {
   const { notifications, addNotification, dismissNotification } = useNotifications();
@@ -21,6 +21,8 @@ const ArbitrageCalculator = () => {
   const [venues, setVenues] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [connectionStatus, setConnectionStatus] = useState('checking'); // 'checking', 'backend', 'fallback', 'failed'
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [calculationInputs, setCalculationInputs] = useState({
     positionSize: '1000',
     customAmount: '',
@@ -36,115 +38,41 @@ const ArbitrageCalculator = () => {
   const [calculationResults, setCalculationResults] = useState(null);
   const [isCalculating, setIsCalculating] = useState(false);
 
-  // Load initial data
-  useEffect(() => {
-    let isMounted = true;
-    
-    const loadInitialData = async () => {
-      try {
-        setLoading(true);
-        setError('');
-        
-        // Load venues and opportunities in parallel
-        const [venuesData, opportunitiesData] = await Promise.all([
-          venueService?.getActiveVenues(),
-          arbitrageService?.getOpportunities({
-            min_spread: 1.0,
-            min_liquidity: 500
-          })
-        ]);
-        
-        if (!isMounted) return;
-        
-        setVenues(venuesData || []);
-        setOpportunities(opportunitiesData || []);
-        
-        // Select first opportunity if available
-        if (opportunitiesData?.length > 0) {
-          setSelectedOpportunity(transformOpportunityData(opportunitiesData?.[0]));
-        }
-        
-      } catch (error) {
-        if (!isMounted) return;
-        
-        setError(error?.message || 'Failed to load arbitrage data');
-        addNotification({
-          type: 'error',
-          title: 'Loading Error',
-          message: error?.message || 'Failed to load arbitrage data',
-          autoClose: 5000
-        });
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-    
-    loadInitialData();
-    
-    return () => {
-      isMounted = false;
-    };
-  }, [addNotification]);
-
-  // Real-time subscription for opportunities
-  useEffect(() => {
-    const unsubscribe = subscriptionService?.subscribeToOpportunities((payload) => {
-      if (payload?.eventType === 'INSERT' || payload?.eventType === 'UPDATE') {
-        // Refresh opportunities when data changes
-        loadOpportunities();
-      }
-    });
-
-    return unsubscribe;
-  }, []);
-
-  // Load opportunities function
-  const loadOpportunities = async () => {
-    try {
-      const data = await arbitrageService?.getOpportunities({
-        min_spread: 1.0,
-        min_liquidity: 500
-      });
-      setOpportunities(data || []);
-    } catch (error) {
-      console.error('Failed to refresh opportunities:', error);
-    }
-  };
-
-  // Transform Supabase opportunity data to match component expectations
-  const transformOpportunityData = (opportunity) => {
-    const venueA = opportunity?.pair?.market_a?.venue;
-    const venueB = opportunity?.pair?.market_b?.venue;
-    const marketA = opportunity?.pair?.market_a;
-    const marketB = opportunity?.pair?.market_b;
-
+  // Transform backend opportunity data to match UI expectations
+  const transformBackendOpportunity = (backendOpp) => {
     return {
-      id: opportunity?.id,
-      market: marketA?.title || marketB?.title || 'Market Pair',
-      category: marketA?.category || marketB?.category || 'Unknown',
-      lastUpdate: getTimeAgo(opportunity?.updated_at),
-      isLive: opportunity?.status === 'active',
+      id: backendOpp?.id || 'opp_' + Math.random()?.toString(36)?.substr(2, 9),
+      market: backendOpp?.pair?.market_a?.title || backendOpp?.pair?.market_b?.title || 'Market Pair',
+      category: backendOpp?.pair?.market_a?.category || backendOpp?.pair?.market_b?.category || 'Unknown',
+      lastUpdate: getTimeAgo(backendOpp?.updated_at || backendOpp?.created_at),
+      isLive: backendOpp?.status === 'active',
       venueA: {
-        name: venueA?.name || 'Venue A',
-        yesPrice: opportunity?.venue_a_side === 'yes' ? opportunity?.venue_a_price * 100 : (1 - opportunity?.venue_a_price) * 100,
-        noPrice: opportunity?.venue_a_side === 'no' ? opportunity?.venue_a_price * 100 : (1 - opportunity?.venue_a_price) * 100,
-        liquidity: opportunity?.venue_a_liquidity || 0
+        name: backendOpp?.pair?.market_a?.venue?.name || 'Venue A',
+        yesPrice: backendOpp?.venue_a_side === 'yes' 
+          ? (backendOpp?.venue_a_price || 0) * 100 
+          : (1 - (backendOpp?.venue_a_price || 0)) * 100,
+        noPrice: backendOpp?.venue_a_side === 'no' 
+          ? (backendOpp?.venue_a_price || 0) * 100 
+          : (1 - (backendOpp?.venue_a_price || 0)) * 100,
+        liquidity: backendOpp?.venue_a_liquidity || 0
       },
       venueB: {
-        name: venueB?.name || 'Venue B',
-        yesPrice: opportunity?.venue_b_side === 'yes' ? opportunity?.venue_b_price * 100 : (1 - opportunity?.venue_b_price) * 100,
-        noPrice: opportunity?.venue_b_side === 'no' ? opportunity?.venue_b_price * 100 : (1 - opportunity?.venue_b_price) * 100,
-        liquidity: opportunity?.venue_b_liquidity || 0
+        name: backendOpp?.pair?.market_b?.venue?.name || 'Venue B',
+        yesPrice: backendOpp?.venue_b_side === 'yes' 
+          ? (backendOpp?.venue_b_price || 0) * 100 
+          : (1 - (backendOpp?.venue_b_price || 0)) * 100,
+        noPrice: backendOpp?.venue_b_side === 'no' 
+          ? (backendOpp?.venue_b_price || 0) * 100 
+          : (1 - (backendOpp?.venue_b_price || 0)) * 100,
+        liquidity: backendOpp?.venue_b_liquidity || 0
       },
-      grossSpread: opportunity?.gross_spread_pct || 0,
-      netSpread: opportunity?.net_spread_pct || 0,
-      confidence: opportunity?.pair?.confidence_score || 85,
-      maxTradableAmount: opportunity?.max_tradable_amount || 0,
-      riskLevel: opportunity?.risk_level || 'medium',
-      expectedProfitUsd: opportunity?.expected_profit_usd || 0,
-      expectedProfitPct: opportunity?.expected_profit_pct || 0
+      grossSpread: backendOpp?.gross_spread_pct || 0,
+      netSpread: backendOpp?.net_spread_pct || 0,
+      confidence: backendOpp?.pair?.confidence_score || 85,
+      maxTradableAmount: backendOpp?.max_tradable_amount || 0,
+      riskLevel: backendOpp?.risk_level || 'medium',
+      expectedProfitUsd: backendOpp?.expected_profit_usd || 0,
+      expectedProfitPct: backendOpp?.expected_profit_pct || 0
     };
   };
 
@@ -160,6 +88,183 @@ const ArbitrageCalculator = () => {
     if (diffInMinutes < 60) return `${diffInMinutes} minutes ago`;
     if (diffInMinutes < 1440) return `${Math.floor(diffInMinutes / 60)} hours ago`;
     return `${Math.floor(diffInMinutes / 1440)} days ago`;
+  };
+
+  // Load initial data with improved error handling and connection management
+  useEffect(() => {
+    let isMounted = true;
+    let retryTimeoutId = null;
+    
+    const loadInitialData = async (attempt = 1) => {
+      try {
+        setLoading(true);
+        setError('');
+        setConnectionStatus('checking');
+        
+        // Check backend health first
+        const backendHealthy = await healthService?.checkBackendHealth();
+        
+        if (!isMounted) return;
+        
+        if (backendHealthy) {
+          setConnectionStatus('backend');
+        } else {
+          setConnectionStatus('fallback');
+          addNotification({
+            type: 'warning',
+            title: 'Backend Unavailable',
+            message: 'Using Supabase database for live arbitrage data.',
+            autoClose: 4000
+          });
+        }
+        
+        // Load venues and opportunities with timeout protection
+        const dataPromises = [
+          Promise.race([
+            venueService?.getActiveVenues(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Venue service timeout')), 10000)
+            )
+          ]),
+          Promise.race([
+            arbitrageService?.getOpportunities({
+              min_spread: 1.0,
+              min_liquidity: 500,
+              limit: 50,
+              status: 'active'
+            }),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Opportunities service timeout')), 10000)
+            )
+          ])
+        ];
+        
+        const [venuesData, opportunitiesData] = await Promise.allSettled(dataPromises);
+        
+        if (!isMounted) return;
+        
+        // Handle venues data
+        if (venuesData?.status === 'fulfilled') {
+          setVenues(venuesData?.value || []);
+        } else {
+          console.warn('Failed to load venues:', venuesData?.reason?.message);
+        }
+        
+        // Handle opportunities data
+        if (opportunitiesData?.status === 'fulfilled') {
+          const transformedOpportunities = opportunitiesData?.value?.map(transformBackendOpportunity) || [];
+          setOpportunities(transformedOpportunities);
+          
+          // Select first opportunity if available
+          if (transformedOpportunities?.length > 0) {
+            setSelectedOpportunity(transformedOpportunities?.[0]);
+            setConnectionStatus(backendHealthy ? 'backend' : 'fallback');
+          } else {
+            setError('No active arbitrage opportunities found');
+          }
+        } else {
+          throw new Error(opportunitiesData?.reason?.message || 'Failed to load opportunities');
+        }
+        
+      } catch (error) {
+        if (!isMounted) return;
+        
+        const errorMessage = error?.message || 'Failed to load arbitrage data';
+        setError(errorMessage);
+        setConnectionStatus('failed');
+        
+        // Implement exponential backoff retry for critical failures
+        if (attempt < 3 && (
+          errorMessage?.includes('timeout') ||
+          errorMessage?.includes('Failed to fetch') ||
+          errorMessage?.includes('NetworkError')
+        )) {
+          const retryDelay = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          setRetryAttempt(attempt);
+          
+          addNotification({
+            type: 'warning',
+            title: `Connection Attempt ${attempt} Failed`,
+            message: `Retrying in ${retryDelay / 1000} seconds...`,
+            autoClose: retryDelay - 500
+          });
+          
+          retryTimeoutId = setTimeout(() => {
+            if (isMounted) {
+              loadInitialData(attempt + 1);
+            }
+          }, retryDelay);
+        } else {
+          addNotification({
+            type: 'error',
+            title: 'Connection Failed',
+            message: errorMessage,
+            autoClose: 8000
+          });
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+    
+    loadInitialData();
+    
+    return () => {
+      isMounted = false;
+      if (retryTimeoutId) {
+        clearTimeout(retryTimeoutId);
+      }
+    };
+  }, [addNotification]);
+
+  // Real-time subscription with improved error handling
+  useEffect(() => {
+    if (connectionStatus === 'failed') return;
+    
+    let unsubscribe = null;
+    
+    try {
+      unsubscribe = subscriptionService?.subscribeToOpportunities((payload) => {
+        if (payload?.eventType === 'UPDATE' || payload?.eventType === 'INSERT') {
+          // Debounced refresh to avoid too many calls
+          setTimeout(() => {
+            loadOpportunities();
+          }, 1000);
+        }
+      });
+    } catch (error) {
+      console.warn('Real-time subscription failed:', error?.message);
+    }
+
+    return () => {
+      if (unsubscribe && typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [connectionStatus]);
+
+  // Load opportunities function with better error handling
+  const loadOpportunities = async () => {
+    try {
+      const data = await arbitrageService?.getOpportunities({
+        min_spread: 1.0,
+        min_liquidity: 500,
+        limit: 50,
+        status: 'active'
+      });
+      
+      const transformedOpportunities = data?.map(transformBackendOpportunity) || [];
+      setOpportunities(transformedOpportunities);
+      
+      // Update selected opportunity if it's no longer available
+      if (selectedOpportunity && !transformedOpportunities?.find(opp => opp?.id === selectedOpportunity?.id)) {
+        setSelectedOpportunity(transformedOpportunities?.[0] || null);
+      }
+    } catch (error) {
+      console.warn('Failed to refresh opportunities:', error?.message);
+    }
   };
 
   // Generate venue options from real data
@@ -245,7 +350,7 @@ ROI: ${calculationResults?.roi?.toFixed(2)}%
 Risk Score: ${calculationResults?.riskScore}/100
     `?.trim();
 
-    navigator.clipboard?.writeText(details);
+    navigator?.clipboard?.writeText(details);
     addNotification({
       type: 'success',
       title: 'Details Copied',
@@ -264,23 +369,30 @@ Risk Score: ${calculationResults?.riskScore}/100
   };
 
   const handleRefreshData = async () => {
+    setError('');
+    setRetryAttempt(0);
+    
     try {
-      setError('');
+      setLoading(true);
       await loadOpportunities();
+      
+      const backendStatus = healthService?.getBackendStatus();
       
       addNotification({
         type: 'success',
         title: 'Data Refreshed',
-        message: 'Arbitrage opportunities have been updated.',
-        autoClose: 2000
+        message: `Updated ${opportunities?.length} opportunities from ${backendStatus?.status === 'healthy' ? 'backend server' : 'Supabase database'}.`,
+        autoClose: 3000
       });
     } catch (error) {
       addNotification({
         type: 'error',
         title: 'Refresh Failed',
         message: error?.message || 'Failed to refresh data',
-        autoClose: 3000
+        autoClose: 4000
       });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -289,7 +401,7 @@ Risk Score: ${calculationResults?.riskScore}/100
       // Cycle to next opportunity
       const currentIndex = opportunities?.findIndex(opp => opp?.id === selectedOpportunity?.id);
       const nextIndex = (currentIndex + 1) % opportunities?.length;
-      setSelectedOpportunity(transformOpportunityData(opportunities?.[nextIndex]));
+      setSelectedOpportunity(opportunities?.[nextIndex]);
     }
   };
 
@@ -344,8 +456,8 @@ Risk Score: ${calculationResults?.riskScore}/100
     ]
   } : null;
 
-  // Loading state
-  if (loading) {
+  // Enhanced loading state with better UX
+  if (loading && !selectedOpportunity) {
     return (
       <div className="min-h-screen bg-background">
         <Header />
@@ -354,19 +466,28 @@ Risk Score: ${calculationResults?.riskScore}/100
           <div className="max-w-4xl mx-auto text-center">
             <Icon name="Loader2" size={48} color="var(--color-text-secondary)" className="mx-auto mb-4 animate-spin" />
             <h2 className="text-2xl font-heading font-semibold text-card-foreground mb-2">
-              Loading Arbitrage Data
+              {connectionStatus === 'checking' ? 'Checking Connection Status' : 'Loading Live Arbitrage Data'}
             </h2>
             <p className="text-text-secondary mb-6">
-              Fetching real-time opportunities and market data...
+              {connectionStatus === 'checking' ? 'Detecting best data source...' :
+               connectionStatus === 'backend' ? 'Connecting to backend server and fetching real-time opportunities...' :
+               connectionStatus === 'fallback'? 'Backend unavailable, loading data from Supabase database...' : 'Fetching live arbitrage data...'}
             </p>
+            {retryAttempt > 0 && (
+              <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 mb-4">
+                <p className="text-sm text-warning">
+                  Connection attempt {retryAttempt} failed, retrying...
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>
     );
   }
 
-  // Error state
-  if (error && !selectedOpportunity) {
+  // Improved error state with retry options
+  if (error && !selectedOpportunity && connectionStatus === 'failed') {
     return (
       <div className="min-h-screen bg-background">
         <Header />
@@ -375,22 +496,36 @@ Risk Score: ${calculationResults?.riskScore}/100
           <div className="max-w-4xl mx-auto text-center">
             <Icon name="AlertCircle" size={48} color="var(--color-error)" className="mx-auto mb-4" />
             <h2 className="text-2xl font-heading font-semibold text-card-foreground mb-2">
-              Failed to Load Data
+              Connection Failed
             </h2>
-            <p className="text-text-secondary mb-6">
+            <p className="text-text-secondary mb-4">
               {error}
             </p>
-            <Button variant="default" onClick={handleRefreshData}>
-              Retry Loading
-            </Button>
+            <div className="bg-muted border border-border rounded-lg p-4 mb-6 text-left max-w-lg mx-auto">
+              <h3 className="font-medium text-card-foreground mb-2">Troubleshooting:</h3>
+              <ul className="text-sm text-text-secondary space-y-1">
+                <li>• Backend server may be temporarily unavailable</li>
+                <li>• Check your internet connection</li>
+                <li>• Supabase database connection may be inactive</li>
+                <li>• Try refreshing in a few minutes</li>
+              </ul>
+            </div>
+            <div className="flex gap-3 justify-center">
+              <Button variant="default" onClick={handleRefreshData} loading={loading}>
+                Retry Connection
+              </Button>
+              <Button variant="outline" onClick={() => window.location.href = '/arbitrage-dashboard'} iconName="ArrowLeft" iconPosition="left">
+                Go to Dashboard
+              </Button>
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  // No opportunities state
-  if (!selectedOpportunity && opportunities?.length === 0) {
+  // No opportunities state with better messaging
+  if (!selectedOpportunity && opportunities?.length === 0 && !loading) {
     return (
       <div className="min-h-screen bg-background">
         <Header />
@@ -399,16 +534,21 @@ Risk Score: ${calculationResults?.riskScore}/100
           <div className="max-w-4xl mx-auto text-center">
             <Icon name="Calculator" size={48} color="var(--color-text-secondary)" className="mx-auto mb-4" />
             <h2 className="text-2xl font-heading font-semibold text-card-foreground mb-2">
-              No Opportunities Available
+              No Active Opportunities Available
             </h2>
-            <p className="text-text-secondary mb-6">
-              There are currently no arbitrage opportunities meeting the minimum criteria. Check back later or adjust your filters.
+            <p className="text-text-secondary mb-4">
+              {connectionStatus === 'backend' ? 'The backend server is connected but no arbitrage opportunities are currently available that meet the minimum criteria.': 'Connected to Supabase database but no active arbitrage opportunities found.'}
             </p>
+            <div className="bg-muted border border-border rounded-lg p-4 mb-6 text-left max-w-lg mx-auto">
+              <p className="text-sm text-text-secondary">
+                <strong>Current filters:</strong> Min spread 1.0%, Min liquidity $500
+              </p>
+            </div>
             <div className="flex gap-3 justify-center">
-              <Button variant="default" onClick={handleRefreshData}>
+              <Button variant="default" onClick={handleRefreshData} loading={loading}>
                 Refresh Data
               </Button>
-              <Button variant="outline" iconName="ArrowLeft" iconPosition="left">
+              <Button variant="outline" onClick={() => window.location.href = '/arbitrage-dashboard'} iconName="ArrowLeft" iconPosition="left">
                 Go to Dashboard
               </Button>
             </div>
@@ -427,7 +567,6 @@ Risk Score: ${calculationResults?.riskScore}/100
         onDismiss={dismissNotification}
         onAction={(notification) => console.log('Action clicked:', notification)}
       />
-      
       <main className="pt-32 pb-16 px-6">
         <div className="max-w-7xl mx-auto">
           {/* Breadcrumb */}
@@ -437,28 +576,51 @@ Risk Score: ${calculationResults?.riskScore}/100
             <span className="text-card-foreground">{selectedOpportunity?.market?.substring(0, 50)}...</span>
           </div>
 
-          {/* Data Status Banner */}
-          <div className="bg-success/10 border border-success/20 rounded-lg p-4 mb-6 flex items-center justify-between">
+          {/* Enhanced Connection Status Banner */}
+          <div className={`border rounded-lg p-4 mb-6 flex items-center justify-between ${
+            connectionStatus === 'backend' ? 'bg-success/10 border-success/20' :
+            connectionStatus === 'fallback'? 'bg-warning/10 border-warning/20' : 'bg-muted border-border'
+          }`}>
             <div className="flex items-center space-x-3">
-              <div className="w-2 h-2 rounded-full bg-success animate-pulse"></div>
+              <div className={`w-2 h-2 rounded-full ${
+                connectionStatus === 'backend' ? 'bg-success animate-pulse' :
+                connectionStatus === 'fallback'? 'bg-warning animate-pulse' : 'bg-text-secondary'
+              }`}></div>
               <div>
                 <p className="text-sm font-medium text-card-foreground">
-                  Live Data Connected
+                  {connectionStatus === 'backend' ? 'Live Backend Connected' :
+                   connectionStatus === 'fallback'? 'Supabase Database Connected' : 'Data Source Connected'}
                 </p>
                 <p className="text-xs text-text-secondary">
-                  Real-time arbitrage opportunities from Supabase • {opportunities?.length} active opportunities
+                  {connectionStatus === 'backend' ? 
+                    `Real-time data from backend server • ${opportunities?.length} live opportunities` :
+                    `Data from Supabase database • ${opportunities?.length} opportunities available`}
                 </p>
               </div>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              iconName="RefreshCw"
-              iconPosition="left"
-              onClick={handleRefreshData}
-            >
-              Refresh
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                iconName="RefreshCw"
+                iconPosition="left"
+                onClick={handleRefreshData}
+                loading={loading}
+              >
+                Refresh
+              </Button>
+              {connectionStatus === 'fallback' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  iconName="Wifi"
+                  iconPosition="left"
+                  onClick={() => healthService?.forceHealthCheck()?.then(() => window.location?.reload())}
+                >
+                  Retry Backend
+                </Button>
+              )}
+            </div>
           </div>
 
           {/* Opportunity Summary */}
@@ -528,7 +690,7 @@ Risk Score: ${calculationResults?.riskScore}/100
                 onClick={handleSelectDifferentOpportunity}
                 disabled={opportunities?.length <= 1}
               >
-                Different Opportunity
+                Different Opportunity ({opportunities?.length} available)
               </Button>
               <Button
                 variant="outline"

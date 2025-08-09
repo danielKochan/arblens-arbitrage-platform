@@ -43,7 +43,7 @@ export const marketService = {
     try {
       let query = supabase?.from('markets')?.select(`
           *,
-          venue:venues(*)
+          venue:venue_id(*)
         `)?.order('last_updated', { ascending: false });
 
       if (filters?.venue_id) {
@@ -77,7 +77,7 @@ export const marketService = {
     try {
       const { data, error } = await supabase?.from('markets')?.select(`
           *,
-          venue:venues(*)
+          venue:venue_id(*)
         `)?.eq('id', marketId)?.single();
       
       if (error) {
@@ -94,21 +94,21 @@ export const marketService = {
   }
 };
 
-// Arbitrage Opportunities Services
+// Arbitrage Opportunities Services - FIXED QUERIES
 export const arbitrageService = {
   async getOpportunities(filters = {}) {
     try {
       let query = supabase?.from('arbitrage_opportunities')?.select(`
           *,
-          pair:market_pairs(
+          pair:pair_id(
             *,
             market_a:market_a_id(
               *,
-              venue:venues(*)
+              venue:venue_id(*)
             ),
             market_b:market_b_id(
               *,
-              venue:venues(*)
+              venue:venue_id(*)
             )
           )
         `)?.eq('status', 'active')?.order('net_spread_pct', { ascending: false });
@@ -119,11 +119,6 @@ export const arbitrageService = {
 
       if (filters?.min_liquidity) {
         query = query?.gte('max_tradable_amount', filters?.min_liquidity);
-      }
-
-      if (filters?.venues?.length > 0) {
-        // This would require a more complex query in practice
-        // For now, we'll filter client-side if needed
       }
 
       const { data, error } = await query?.limit(50);
@@ -143,7 +138,20 @@ export const arbitrageService = {
 
   async getOpportunityById(opportunityId) {
     try {
-      const { data, error } = await supabase?.from('arbitrage_opportunities')?.select(`*,pair:market_pairs(*,market_a:market_a_id(*,venue:venues(*)),market_b:market_b_id(*,venue:venues(*)))`)?.eq('id', opportunityId)?.single();
+      const { data, error } = await supabase?.from('arbitrage_opportunities')?.select(`
+          *,
+          pair:pair_id(
+            *,
+            market_a:market_a_id(
+              *,
+              venue:venue_id(*)
+            ),
+            market_b:market_b_id(
+              *,
+              venue:venue_id(*)
+            )
+          )
+        `)?.eq('id', opportunityId)?.single();
       
       if (error) {
         throw error;
@@ -159,7 +167,7 @@ export const arbitrageService = {
   }
 };
 
-// Market Pair Services
+// Market Pair Services - FIXED QUERIES
 export const marketPairService = {
   async getMarketPairs(filters = {}) {
     try {
@@ -167,11 +175,11 @@ export const marketPairService = {
           *,
           market_a:market_a_id(
             *,
-            venue:venues(*)
+            venue:venue_id(*)
           ),
           market_b:market_b_id(
             *,
-            venue:venues(*)
+            venue:venue_id(*)
           )
         `)?.order('confidence_score', { ascending: false });
 
@@ -421,15 +429,15 @@ export const backtestService = {
     try {
       let query = supabase?.from('arbitrage_opportunities')?.select(`
           *,
-          pair:market_pairs(
+          pair:pair_id(
             *,
             market_a:market_a_id(
               *,
-              venue:venues(*)
+              venue:venue_id(*)
             ),
             market_b:market_b_id(
               *,
-              venue:venues(*)
+              venue:venue_id(*)
             )
           )
         `)?.gte('created_at', startDate)?.lte('created_at', endDate)?.order('created_at', { ascending: false });
@@ -816,3 +824,19 @@ export const subscriptionService = {
     return () => supabase?.removeChannel(channel);
   }
 };
+
+// Fixed export structure
+const supabaseServices = {
+  venueService,
+  marketService,
+  arbitrageService,
+  marketPairService,
+  apiKeyService,
+  alertService,
+  backtestService,
+  systemSettingsService,
+  subscriptionService,
+  supabase
+};
+
+export default supabaseServices;

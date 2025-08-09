@@ -6,6 +6,8 @@ import FilterSidebar from './components/FilterSidebar';
 import DashboardToolbar from './components/DashboardToolbar';
 import { OpportunityTable } from './components/OpportunityTable';
 import OpportunityDetailModal from './components/OpportunityDetailModal';
+import { arbitrageService, subscriptionService } from '../../utils/backendServices';
+import supabaseServices from '../../utils/supabaseServices';
 
 const ArbitrageDashboard = () => {
   const [isFilterSidebarCollapsed, setIsFilterSidebarCollapsed] = useState(false);
@@ -14,6 +16,8 @@ const ArbitrageDashboard = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(new Date());
   const [sortConfig, setSortConfig] = useState({ key: 'netSpread', direction: 'desc' });
+  const [opportunities, setOpportunities] = useState([]);
+  const [error, setError] = useState('');
   
   const { notifications, addNotification, dismissNotification } = useNotifications();
 
@@ -27,93 +31,151 @@ const ArbitrageDashboard = () => {
     searchTerm: ''
   });
 
-  // Mock arbitrage opportunities data
-  const mockOpportunities = [
-    {
-      id: 'arb_001',
-      market: 'Will Donald Trump win the 2024 US Presidential Election?',
-      category: 'Politics',
+  // Transform Supabase opportunity data to match UI expectations
+  const transformSupabaseOpportunity = (supabaseOpp) => {
+    return {
+      id: supabaseOpp?.id || 'opp_' + Math.random()?.toString(36)?.substr(2, 9),
+      market: supabaseOpp?.pair?.market_a?.title || supabaseOpp?.pair?.market_b?.title || 'Market Pair',
+      category: supabaseOpp?.pair?.market_a?.category || supabaseOpp?.pair?.market_b?.category || 'Unknown',
       venues: [
-        { name: 'Polymarket', price: 52.3, volume: 45000, fee: 0.5 },
-        { name: 'Kalshi', price: 48.7, volume: 32000, fee: 0.3 }
+        { 
+          name: supabaseOpp?.pair?.market_a?.venue?.name || 'Venue A', 
+          price: (supabaseOpp?.venue_a_price || 0) * 100, 
+          volume: supabaseOpp?.venue_a_liquidity || 0, 
+          fee: 0.02 // Default 2% fee
+        },
+        { 
+          name: supabaseOpp?.pair?.market_b?.venue?.name || 'Venue B', 
+          price: (supabaseOpp?.venue_b_price || 0) * 100, 
+          volume: supabaseOpp?.venue_b_liquidity || 0, 
+          fee: 0.02 // Default 2% fee
+        }
       ],
-      grossSpread: 3.6,
-      netSpread: 2.8,
-      liquidity: 77000,
-      confidence: 87,
-      isNew: true,
-      buyLink: 'https://polymarket.com/event/presidential-election-2024',
-      sellLink: 'https://kalshi.com/events/PRES-24'
-    },
-    {
-      id: 'arb_002',
-      market: 'Bitcoin to reach $100,000 by end of 2024?',
-      category: 'Crypto',
-      venues: [
-        { name: 'Manifold', price: 34.2, volume: 12000, fee: 0.0 },
-        { name: 'Betfair', price: 31.8, volume: 28000, fee: 0.8 }
+      grossSpread: supabaseOpp?.gross_spread_pct || 0,
+      netSpread: supabaseOpp?.net_spread_pct || 0,
+      liquidity: supabaseOpp?.max_tradable_amount || 0,
+      confidence: supabaseOpp?.pair?.confidence_score || 85,
+      isNew: new Date(supabaseOpp?.created_at || Date.now()) > new Date(Date.now() - 300000), // 5 minutes
+      buyLink: '#', // No direct links available
+      sellLink: '#'
+    };
+  };
+
+  // Transform backend opportunity data to match UI expectations
+  const transformBackendOpportunity = (backendOpp) => {
+    return {
+      id: backendOpp?.id || 'opp_' + Math.random()?.toString(36)?.substr(2, 9),
+      market: backendOpp?.market || 'Market Pair',
+      category: backendOpp?.category || 'Unknown',
+      venues: backendOpp?.venues || [
+        { name: 'Venue A', price: 0, volume: 0, fee: 0.02 },
+        { name: 'Venue B', price: 0, volume: 0, fee: 0.02 }
       ],
-      grossSpread: 2.4,
-      netSpread: 1.6,
-      liquidity: 40000,
-      confidence: 73,
-      isNew: false,
-      buyLink: 'https://manifold.markets/bitcoin-100k',
-      sellLink: 'https://betfair.com/crypto-markets'
-    },
-    {
-      id: 'arb_003',
-      market: 'Will the Federal Reserve cut rates in December 2024?',
-      category: 'Economics',
-      venues: [
-        { name: 'Kalshi', price: 67.5, volume: 89000, fee: 0.3 },
-        { name: 'Polymarket', price: 63.1, volume: 56000, fee: 0.5 }
-      ],
-      grossSpread: 4.4,
-      netSpread: 3.6,
-      liquidity: 145000,
-      confidence: 92,
-      isNew: false,
-      buyLink: 'https://kalshi.com/events/FED-RATE-DEC',
-      sellLink: 'https://polymarket.com/event/fed-rates-december'
-    },
-    {
-      id: 'arb_004',
-      market: 'Will Taylor Swift announce new album in 2024?',
-      category: 'Entertainment',
-      venues: [
-        { name: 'Manifold', price: 28.9, volume: 8500, fee: 0.0 },
-        { name: 'Polymarket', price: 25.3, volume: 15000, fee: 0.5 }
-      ],
-      grossSpread: 3.6,
-      netSpread: 3.1,
-      liquidity: 23500,
-      confidence: 65,
-      isNew: true,
-      buyLink: 'https://manifold.markets/taylor-swift-album',
-      sellLink: 'https://polymarket.com/event/taylor-swift-2024'
-    },
-    {
-      id: 'arb_005',
-      market: 'Will there be a major earthquake (7.0+) in California in 2024?',
-      category: 'Weather',
-      venues: [
-        { name: 'Betfair', price: 15.7, volume: 22000, fee: 0.8 },
-        { name: 'Kalshi', price: 12.4, volume: 18000, fee: 0.3 }
-      ],
-      grossSpread: 3.3,
-      netSpread: 2.2,
-      liquidity: 40000,
-      confidence: 58,
-      isNew: false,
-      buyLink: 'https://betfair.com/natural-disasters',
-      sellLink: 'https://kalshi.com/events/EARTHQUAKE-CA'
-    }
-  ];
+      grossSpread: backendOpp?.gross_spread || 0,
+      netSpread: backendOpp?.net_spread || 0,
+      liquidity: backendOpp?.liquidity || 0,
+      confidence: backendOpp?.confidence || 85,
+      isNew: new Date(backendOpp?.created_at || Date.now()) > new Date(Date.now() - 300000),
+      buyLink: backendOpp?.buy_link || '#',
+      sellLink: backendOpp?.sell_link || '#'
+    };
+  };
+
+  // Load initial opportunities with Supabase fallback
+  useEffect(() => {
+    let isMounted = true;
+    
+    const loadOpportunities = async () => {
+      try {
+        setIsLoading(true);
+        setError('');
+        
+        // Try backend first, fallback to Supabase automatically
+        let data;
+        try {
+          data = await arbitrageService?.getOpportunities({
+            min_spread: 1.0,
+            min_liquidity: 500,
+            limit: 100,
+            status: 'active'
+          });
+          // Transform backend data
+          let transformedOpportunities = data?.map(transformBackendOpportunity) || [];
+          setOpportunities(transformedOpportunities);
+        } catch (backendError) {
+          // If backend fails, use Supabase directly
+          console.warn('Backend failed, using Supabase directly:', backendError?.message);
+          data = await supabaseServices?.arbitrageService?.getOpportunities({
+            min_spread: 1.0,
+            min_liquidity: 500
+          });
+          // Transform Supabase data
+          let transformedOpportunities = data?.map(transformSupabaseOpportunity) || [];
+          setOpportunities(transformedOpportunities);
+        }
+        
+        if (!isMounted) return;
+        
+        setLastUpdated(new Date());
+        
+      } catch (error) {
+        if (!isMounted) return;
+        
+        setError(error?.message || 'Failed to load opportunities');
+        addNotification({
+          type: 'error',
+          title: 'Loading Error', 
+          message: error?.message || 'Failed to connect to data source',
+          autoClose: 5000
+        });
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    };
+    
+    loadOpportunities();
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [addNotification]);
+
+  // Real-time subscription for opportunities
+  useEffect(() => {
+    // Always use Supabase for real-time subscriptions
+    const unsubscribe = supabaseServices?.subscriptionService?.subscribeToOpportunities((payload) => {
+      if (payload?.eventType === 'INSERT' && payload?.new) {
+        const newOpportunity = transformSupabaseOpportunity(payload?.new);
+        setOpportunities(prev => [newOpportunity, ...prev?.slice(0, 49)]); // Keep 50 most recent
+        setLastUpdated(new Date());
+        
+        // Show notification for high-confidence opportunities
+        if (newOpportunity?.netSpread > 3 && newOpportunity?.confidence > 85) {
+          addNotification({
+            type: 'opportunity',
+            title: 'New High-Value Opportunity',
+            message: `${newOpportunity?.netSpread?.toFixed(2)}% spread on ${newOpportunity?.market}`,
+            data: newOpportunity,
+            autoClose: 8000
+          });
+        }
+      } else if (payload?.eventType === 'UPDATE' && payload?.new) {
+        const updatedOpportunity = transformSupabaseOpportunity(payload?.new);
+        setOpportunities(prev => 
+          prev?.map(opp => opp?.id === updatedOpportunity?.id ? updatedOpportunity : opp)
+        );
+        setLastUpdated(new Date());
+      }
+    });
+
+    return unsubscribe;
+  }, [addNotification]);
 
   // Filter and sort opportunities
   const filteredAndSortedOpportunities = useMemo(() => {
-    let filtered = mockOpportunities?.filter(opportunity => {
+    let filtered = opportunities?.filter(opportunity => {
       // Venue filter
       if (filters?.venues?.length > 0) {
         const hasMatchingVenue = opportunity?.venues?.some(venue => 
@@ -167,7 +229,7 @@ const ArbitrageDashboard = () => {
     });
 
     return filtered;
-  }, [filters, sortConfig]);
+  }, [opportunities, filters, sortConfig]);
 
   // Handle filter changes
   const handleFiltersChange = (newFilters) => {
@@ -216,31 +278,76 @@ const ArbitrageDashboard = () => {
     setIsDetailModalOpen(true);
   };
 
-  // Handle refresh
-  const handleRefresh = () => {
-    setIsLoading(true);
-    setLastUpdated(new Date());
-    
-    // Simulate API call
-    setTimeout(() => {
-      setIsLoading(false);
+  // Handle refresh with improved fallback
+  const handleRefresh = async () => {
+    try {
+      setIsLoading(true);
+      setError('');
       
-      // Add notification for new opportunities
-      if (Math.random() > 0.7) {
+      let data;
+      let transformedOpportunities;
+      
+      try {
+        // Try backend first
+        data = await arbitrageService?.getOpportunities({
+          min_spread: 1.0,
+          min_liquidity: 500,
+          limit: 100,
+          status: 'active'
+        });
+        transformedOpportunities = data?.map(transformBackendOpportunity) || [];
+      } catch (backendError) {
+        // Fallback to Supabase
+        console.warn('Backend refresh failed, using Supabase:', backendError?.message);
+        data = await supabaseServices?.arbitrageService?.getOpportunities({
+          min_spread: 1.0,
+          min_liquidity: 500
+        });
+        transformedOpportunities = data?.map(transformSupabaseOpportunity) || [];
+      }
+      
+      setOpportunities(transformedOpportunities);
+      setLastUpdated(new Date());
+      
+      // Add success notification
+      addNotification({
+        type: 'success',
+        title: 'Data Refreshed',
+        message: `Loaded ${transformedOpportunities?.length} live arbitrage opportunities`,
+        autoClose: 3000
+      });
+      
+      // Check for high-confidence opportunities
+      const highConfidenceOpps = transformedOpportunities?.filter(opp => 
+        opp?.netSpread > 3 && opp?.confidence > 85
+      );
+      
+      if (highConfidenceOpps?.length > 0) {
         addNotification({
           type: 'opportunity',
-          title: 'New High-Confidence Opportunity',
-          message: 'Bitcoin $100K prediction shows 4.2% spread',
+          title: 'High-Confidence Opportunities',
+          message: `${highConfidenceOpps?.length} opportunities with >3% spread available`,
           data: {
-            pair: 'BTC-100K',
-            profit: '4.2'
+            count: highConfidenceOpps?.length,
+            maxSpread: Math.max(...highConfidenceOpps?.map(o => o?.netSpread))
           },
           action: {
-            label: 'View Details'
+            label: 'View Opportunities'
           }
         });
       }
-    }, 1500);
+      
+    } catch (error) {
+      setError(error?.message || 'Failed to refresh data');
+      addNotification({
+        type: 'error',
+        title: 'Refresh Failed',
+        message: error?.message || 'Could not connect to any data source',
+        autoClose: 5000
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Handle export
@@ -271,32 +378,33 @@ const ArbitrageDashboard = () => {
   // Auto-refresh every 30 seconds
   useEffect(() => {
     const interval = setInterval(() => {
-      setLastUpdated(new Date());
+      handleRefresh();
     }, 30000);
 
     return () => clearInterval(interval);
   }, []);
 
-  // Simulate new opportunities
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (Math.random() > 0.8) {
-        addNotification({
-          type: 'opportunity',
-          title: 'Price Movement Alert',
-          message: 'Significant spread change detected in Fed rates market',
-          autoClose: 8000
-        });
-      }
-    }, 45000);
-
-    return () => clearInterval(interval);
-  }, [addNotification]);
-
+  // Backend Connection Status Banner
   return (
     <div className="min-h-screen bg-background">
       <Header />
       <NavigationTabs />
+      <div className="bg-success/10 border-b border-success/20 px-6 py-2">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <div className="w-2 h-2 rounded-full bg-success animate-pulse"></div>
+            <span className="text-sm font-medium text-success">
+              Connected to Live Backend
+            </span>
+            <span className="text-xs text-text-secondary">
+              • https://arblens-backend.onrender.com • {opportunities?.length || 0} opportunities
+            </span>
+          </div>
+          <div className="text-xs text-text-secondary">
+            Last updated: {lastUpdated?.toLocaleTimeString()}
+          </div>
+        </div>
+      </div>
       <div className="flex h-[calc(100vh-8rem)]">
         {/* Filter Sidebar */}
         <div className={`${isFilterSidebarCollapsed ? 'hidden lg:hidden' : 'block'} flex-shrink-0`}>
@@ -322,6 +430,21 @@ const ArbitrageDashboard = () => {
           />
 
           <div className="flex-1 overflow-auto p-6">
+            {error && (
+              <div className="bg-error/10 border border-error/20 rounded-lg p-4 mb-6 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-error">Backend Connection Error</p>
+                  <p className="text-xs text-text-secondary mt-1">{error}</p>
+                </div>
+                <button
+                  onClick={handleRefresh}
+                  className="px-3 py-1 text-xs bg-error text-white rounded hover:bg-error/90"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            
             <OpportunityTable
               opportunities={filteredAndSortedOpportunities}
               onSort={handleSort}
@@ -356,13 +479,12 @@ const ArbitrageDashboard = () => {
         onDismiss={dismissNotification}
         onAction={(notification) => {
           if (notification?.data) {
-            // Find and show the opportunity
-            const opportunity = mockOpportunities?.find(opp => 
-              opp?.market?.toLowerCase()?.includes('bitcoin') || 
-              opp?.market?.toLowerCase()?.includes('fed')
+            // Find and show high spread opportunities
+            const highSpreadOpps = opportunities?.filter(opp => 
+              opp?.netSpread > 3 && opp?.confidence > 85
             );
-            if (opportunity) {
-              setSelectedOpportunity(opportunity);
+            if (highSpreadOpps?.length > 0) {
+              setSelectedOpportunity(highSpreadOpps?.[0]);
               setIsDetailModalOpen(true);
             }
           }
