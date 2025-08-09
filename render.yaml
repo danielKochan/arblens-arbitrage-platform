@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: arblens-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.6
+      - key: DATABASE_URL
+        fromDatabase:
+          name: arblens-db
+          property: connectionString
+      - key: FRONTEND_URL
+        value: https://your-frontend-domain.com
+      - key: ENVIRONMENT
+        value: production
+    healthCheckPath: /health
+    
+  # Optional: Add database if not using external Supabase
+  # - type: pserv
+  #   name: arblens-db
+  #   env: postgresql
+  #   plan: free
+  #   databases:
+  #     - name: arblens
+  #       user: arblens_user
