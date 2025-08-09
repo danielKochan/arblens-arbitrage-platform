@@ -165,13 +165,21 @@ const executeWithFallback = async (backendFn, supabaseFn, serviceName) => {
   } catch (error) {
     console.warn(`${serviceName}: Backend failed (${error?.message}), attempting Supabase fallback...`);
     
+    // Enhanced error categorization for 400 Bad Request specifically
+    if (error?.message?.includes('400') || error?.message?.includes('Bad Request')) {
+      console.error(`${serviceName}: Backend returned 400 Bad Request - this indicates a client error in the request format`);
+    }
+    
     // Only fallback for connection/infrastructure issues
     if (error?.message?.includes('Cannot connect to backend server') || 
         error?.message?.includes('Failed to fetch') ||
         error?.message?.includes('timeout') ||
         error?.message?.includes('NetworkError') ||
         error?.message?.includes('CORS') ||
-        error?.message?.includes('net::ERR_')) {
+        error?.message?.includes('net::ERR_') ||
+        error?.message?.includes('400') ||
+        error?.message?.includes('503') ||
+        error?.message?.includes('502')) {
       
       try {
         const result = await supabaseFn();
@@ -527,10 +535,16 @@ export const healthService = {
     // Also try a basic API call to verify full connectivity
     if (result) {
       try {
-        await makeApiRequest('/api/v1/stats');
-        console.log('Backend connectivity fully verified');
+        await makeApiRequest('/api/v1/opportunities?limit=1');
+        console.log('Backend opportunities endpoint connectivity verified');
       } catch (error) {
-        console.warn('Backend health check passed but API call failed:', error?.message);
+        console.warn('Backend health check passed but opportunities API call failed:', error?.message);
+        
+        // If we get 400 Bad Request, that might indicate parameter issues
+        if (error?.message?.includes('400')) {
+          console.error('Backend returning 400 Bad Request - check API parameter formatting');
+        }
+        
         backendHealthStatus = 'unhealthy';
         return false;
       }
@@ -558,6 +572,33 @@ export const healthService = {
         status: 'failed',
         url: BACKEND_BASE_URL,
         error: error?.message
+      };
+    }
+  },
+
+  // New method to test specific endpoint
+  async testOpportunitiesEndpoint() {
+    try {
+      const testParams = {
+        min_spread: 1,
+        min_liquidity: 500,
+        limit: 10,
+        status: 'active'
+      };
+      
+      const opportunities = await arbitrageService.getOpportunities(testParams);
+      
+      return {
+        success: true,
+        count: opportunities?.length || 0,
+        sampleData: opportunities?.[0] || null,
+        message: 'Opportunities endpoint working correctly'
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error?.message,
+        message: 'Opportunities endpoint test failed'
       };
     }
   }

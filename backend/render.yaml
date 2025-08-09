@@ -8,6 +8,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.6
+      - key: SUPABASE_DB_URL
+        value: your_supabase_connection_string_here
       - key: DATABASE_URL
         fromDatabase:
           name: arblens-db

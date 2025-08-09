@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import asyncio
@@ -11,51 +11,142 @@ import json
 # Initialize FastAPI app
 app = FastAPI(
     title="ArbLens API",
-    version="1.0.0",
+    version="1.0.0", 
     description="AI-powered arbitrage detection platform API"
 )
 
-# CORS middleware for React frontend
+# Enhanced CORS middleware for production deployment
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173", 
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "https://*.vercel.app",
+    "https://*.netlify.app",
+    "https://*.onrender.com",
+    "https://arblens.onrender.com",
+    "https://arblens-frontend.onrender.com"
+]
+
+# Add environment-specific origins
+if os.getenv("FRONTEND_URL"):
+    origins.append(os.getenv("FRONTEND_URL"))
+if os.getenv("FRONTEND_DOMAIN"):
+    origins.append(os.getenv("FRONTEND_DOMAIN"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173", 
-        "https://*.vercel.app",
-        "https://*.netlify.app",
-        os.getenv("FRONTEND_URL", "")
-    ],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=[
+        "*",
+        "Accept",
+        "Accept-Language", 
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "Cache-Control",
+        "X-Requested-With"
+    ],
+    expose_headers=["*"],
+    max_age=86400,  # 24 hours
 )
 
-# Database connection
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+# Add explicit OPTIONS handler for problematic routes
+@app.options("/api/v1/opportunities")
+@app.options("/api/v1/venues")
+@app.options("/api/v1/markets")
+@app.options("/api/v1/stats")
+@app.options("/api/v1/backtests")
+async def handle_options():
+    """Handle OPTIONS preflight requests"""
+    return JSONResponse(
+        status_code=200,
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
+
+# Database connection with better error handling
+DATABASE_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
 
 async def get_db_connection():
-    """Get database connection"""
+    """Get database connection with enhanced error handling"""
     if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="Database URL not configured")
+        raise HTTPException(
+            status_code=500, 
+            detail="Database configuration missing. Please set SUPABASE_DB_URL environment variable."
+        )
     
     try:
-        return await asyncpg.connect(DATABASE_URL)
+        # Add connection timeout and better error handling
+        connection = await asyncpg.connect(
+            DATABASE_URL,
+            timeout=15.0,
+            server_settings={
+                'application_name': 'arblens_api'
+            }
+        )
+        
+        # Test the connection
+        await connection.execute("SELECT 1")
+        return connection
+        
+    except asyncpg.InvalidAuthorizationSpecificationError as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Database authentication failed. Check your Supabase connection string and credentials: {str(e)}"
+        )
+    except asyncpg.InvalidCatalogNameError as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Database not found. Check your Supabase project URL and database name: {str(e)}"
+        )
+    except asyncpg.PostgresConnectionError as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Cannot connect to Supabase database. Check network connectivity and Supabase status: {str(e)}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Database connection failed: {str(e)}"
+        )
 
-# Health check endpoint
+# Enhanced health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for deployment monitoring"""
+    """Enhanced health check endpoint for deployment monitoring"""
     try:
         conn = await get_db_connection()
-        await conn.execute("SELECT 1")
+        
+        # Test database query
+        result = await conn.fetchval("SELECT COUNT(*) FROM arbitrage_opportunities WHERE status = 'active'")
         await conn.close()
-        return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": "connected",
+            "active_opportunities": result or 0,
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "cors_origins": len(origins)
+        }
     except Exception as e:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "error": str(e), "timestamp": datetime.utcnow().isoformat()}
+            content={
+                "status": "unhealthy", 
+                "error": str(e), 
+                "timestamp": datetime.utcnow().isoformat(),
+                "database": "disconnected",
+                "environment": os.getenv("ENVIRONMENT", "development")
+            }
         )
 
 # Root endpoint
@@ -66,68 +157,81 @@ async def root():
         "message": "ArbLens API is running",
         "version": "1.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "database_configured": bool(DATABASE_URL),
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "cors_enabled": True
     }
 
-# Arbitrage Opportunities Endpoints
+# Enhanced Arbitrage Opportunities Endpoints with better parameter validation
 @app.get("/api/v1/opportunities")
 async def get_arbitrage_opportunities(
-    min_spread: Optional[float] = Query(None, description="Minimum spread percentage"),
-    min_liquidity: Optional[float] = Query(None, description="Minimum liquidity in USD"),
+    request: Request,
+    min_spread: Optional[float] = Query(None, description="Minimum spread percentage", ge=0),
+    min_liquidity: Optional[float] = Query(None, description="Minimum liquidity in USD", ge=0),
     venues: Optional[str] = Query(None, description="Comma-separated venue names"),
     category: Optional[str] = Query(None, description="Market category filter"),
-    limit: Optional[int] = Query(50, description="Maximum number of results"),
+    limit: Optional[int] = Query(50, description="Maximum number of results", ge=1, le=1000),
     status: Optional[str] = Query("active", description="Opportunity status")
 ):
-    """Get current arbitrage opportunities with filtering"""
+    """Get current arbitrage opportunities with filtering and enhanced error handling"""
     try:
         conn = await get_db_connection()
         
-        # Build query
-        query = """
-        SELECT ao.*, 
-               mp.confidence_score,
-               ma.title as market_a_title, ma.category as market_a_category,
-               mb.title as market_b_title, mb.category as market_b_category,
-               va.name as venue_a_name, va.venue_type as venue_a_type,
-               vb.name as venue_b_name, vb.venue_type as venue_b_type
-        FROM arbitrage_opportunities ao
-        JOIN market_pairs mp ON ao.pair_id = mp.id
-        JOIN markets ma ON mp.market_a_id = ma.id
-        JOIN markets mb ON mp.market_b_id = mb.id  
-        JOIN venues va ON ma.venue_id = va.id
-        JOIN venues vb ON mb.venue_id = vb.id
-        WHERE ao.status = $1
-        """
-        
-        params = [status]
-        param_count = 1
-        
-        if min_spread is not None:
-            param_count += 1
-            query += f" AND ao.net_spread_pct >= ${param_count}"
-            params.append(min_spread)
+        # Build query with proper error handling
+        try:
+            query = """
+            SELECT ao.*, 
+                   mp.confidence_score,
+                   ma.title as market_a_title, ma.category as market_a_category,
+                   mb.title as market_b_title, mb.category as market_b_category,
+                   va.name as venue_a_name, va.venue_type as venue_a_type,
+                   vb.name as venue_b_name, vb.venue_type as venue_b_type
+            FROM arbitrage_opportunities ao
+            JOIN market_pairs mp ON ao.pair_id = mp.id
+            JOIN markets ma ON mp.market_a_id = ma.id
+            JOIN markets mb ON mp.market_b_id = mb.id  
+            JOIN venues va ON ma.venue_id = va.id
+            JOIN venues vb ON mb.venue_id = vb.id
+            WHERE ao.status = $1
+            """
             
-        if min_liquidity is not None:
-            param_count += 1
-            query += f" AND ao.max_tradable_amount >= ${param_count}"
-            params.append(min_liquidity)
+            params = [status]
+            param_count = 1
             
-        if category:
-            param_count += 1
-            query += f" AND (ma.category = ${param_count} OR mb.category = ${param_count})"
-            params.append(category)
+            if min_spread is not None:
+                param_count += 1
+                query += f" AND ao.net_spread_pct >= ${param_count}"
+                params.append(min_spread)
+                
+            if min_liquidity is not None:
+                param_count += 1
+                query += f" AND ao.max_tradable_amount >= ${param_count}"
+                params.append(min_liquidity)
+                
+            if category:
+                param_count += 1
+                query += f" AND (ma.category = ${param_count} OR mb.category = ${param_count})"
+                params.append(category)
+                
+            if venues:
+                venue_list = [v.strip() for v in venues.split(',')]
+                param_count += 1
+                query += f" AND (va.name = ANY(${param_count}) OR vb.name = ANY(${param_count}))"
+                params.append(venue_list)
             
-        if venues:
-            venue_list = [v.strip() for v in venues.split(',')]
-            param_count += 1
-            query += f" AND (va.name = ANY(${param_count}) OR vb.name = ANY(${param_count}))"
-            params.append(venue_list)
+            query += f" ORDER BY ao.net_spread_pct DESC LIMIT ${param_count + 1}"
+            params.append(limit)
+            
+            rows = await conn.fetch(query, *params)
+            
+        except asyncpg.PostgresError as e:
+            await conn.close()
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Database query failed: {str(e)}"
+            )
         
-        query += f" ORDER BY ao.net_spread_pct DESC LIMIT ${param_count + 1}"
-        params.append(limit)
-        
-        rows = await conn.fetch(query, *params)
         await conn.close()
         
         # Convert to list of dicts
@@ -151,57 +255,25 @@ async def get_arbitrage_opportunities(
                 "min_liquidity": min_liquidity,
                 "venues": venues,
                 "category": category,
-                "status": status
-            }
+                "status": status,
+                "limit": limit
+            },
+            "timestamp": datetime.utcnow().isoformat()
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch opportunities: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Unexpected error retrieving opportunities: {str(e)}"
+        )
 
-@app.get("/api/v1/opportunities/{opportunity_id}")
-async def get_opportunity_detail(opportunity_id: str):
-    """Get detailed information for a specific arbitrage opportunity"""
-    try:
-        conn = await get_db_connection()
-        
-        query = """
-        SELECT ao.*, 
-               mp.confidence_score, mp.is_manual_override,
-               ma.*, va.name as venue_a_name, va.venue_type as venue_a_type, va.fee_bps as venue_a_fee,
-               mb.*, vb.name as venue_b_name, vb.venue_type as venue_b_type, vb.fee_bps as venue_b_fee
-        FROM arbitrage_opportunities ao
-        JOIN market_pairs mp ON ao.pair_id = mp.id
-        JOIN markets ma ON mp.market_a_id = ma.id
-        JOIN markets mb ON mp.market_b_id = mb.id
-        JOIN venues va ON ma.venue_id = va.id
-        JOIN venues vb ON mb.venue_id = vb.id
-        WHERE ao.id = $1
-        """
-        
-        row = await conn.fetchrow(query, opportunity_id)
-        await conn.close()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Opportunity not found")
-        
-        # Convert to dict and handle data types
-        opportunity = dict(row)
-        for key, value in opportunity.items():
-            if hasattr(value, '__float__'):
-                opportunity[key] = float(value)
-            elif isinstance(value, datetime):
-                opportunity[key] = value.isoformat()
-        
-        return opportunity
-        
-    except Exception as e:
-        if "not found" in str(e):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to fetch opportunity: {str(e)}")
-
-# Venue Endpoints
+# Enhanced Venue Endpoints with better validation
 @app.get("/api/v1/venues")
 async def get_venues(
+    request: Request,
     status: Optional[str] = Query("active", description="Venue status filter"),
     venue_type: Optional[str] = Query(None, description="Venue type filter")
 ):
@@ -238,18 +310,23 @@ async def get_venues(
                     venue[key] = value.isoformat()
             venues.append(venue)
         
-        return {"venues": venues, "total": len(venues)}
+        return {
+            "venues": venues, 
+            "total": len(venues),
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch venues: {str(e)}")
 
-# Market Endpoints
+# Enhanced Market Endpoints
 @app.get("/api/v1/markets")
 async def get_markets(
+    request: Request,
     venue_id: Optional[str] = Query(None, description="Filter by venue ID"),
     category: Optional[str] = Query(None, description="Filter by category"),
     status: Optional[str] = Query("active", description="Market status filter"),
-    limit: Optional[int] = Query(100, description="Maximum number of results")
+    limit: Optional[int] = Query(100, description="Maximum number of results", ge=1, le=1000)
 ):
     """Get list of markets"""
     try:
@@ -295,14 +372,56 @@ async def get_markets(
                     market[key] = value.isoformat()
             markets.append(market)
         
-        return {"markets": markets, "total": len(markets)}
+        return {
+            "markets": markets, 
+            "total": len(markets),
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch markets: {str(e)}")
 
-# Backtest Endpoints  
+# Platform Statistics with fallback
+@app.get("/api/v1/stats")
+async def get_platform_stats(request: Request):
+    """Get platform-wide statistics"""
+    try:
+        conn = await get_db_connection()
+        
+        # Get various stats
+        stats_queries = {
+            'active_opportunities': "SELECT COUNT(*) FROM arbitrage_opportunities WHERE status = 'active'",
+            'total_venues': "SELECT COUNT(*) FROM venues WHERE status = 'active'",
+            'total_markets': "SELECT COUNT(*) FROM markets WHERE status = 'active'",
+            'avg_spread': "SELECT AVG(net_spread_pct) FROM arbitrage_opportunities WHERE status = 'active'",
+            'total_volume': "SELECT SUM(max_tradable_amount) FROM arbitrage_opportunities WHERE status = 'active'"
+        }
+        
+        stats = {}
+        for key, query in stats_queries.items():
+            result = await conn.fetchval(query)
+            if result is not None:
+                if hasattr(result, '__float__'):
+                    stats[key] = round(float(result), 2)
+                else:
+                    stats[key] = result
+            else:
+                stats[key] = 0
+        
+        await conn.close()
+        
+        return {
+            "stats": stats,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+# Enhanced Backtest Endpoints  
 @app.post("/api/v1/backtests")
 async def create_backtest(
+    request: Request,
     backtest_data: Dict[str, Any],
     background_tasks: BackgroundTasks
 ):
@@ -362,7 +481,7 @@ async def create_backtest(
         raise HTTPException(status_code=500, detail=f"Failed to create backtest: {str(e)}")
 
 @app.get("/api/v1/backtests/{backtest_id}")
-async def get_backtest_results(backtest_id: str):
+async def get_backtest_results(request: Request, backtest_id: str):
     """Get backtest results"""
     try:
         conn = await get_db_connection()
@@ -497,58 +616,76 @@ async def calculate_backtest_results(backtest_id: str, backtest_data: Dict[str, 
         print(f"Error calculating backtest {backtest_id}: {e}")
         # Update backtest with error status could be added here
 
-# Statistics endpoint
-@app.get("/api/v1/stats")
-async def get_platform_stats():
-    """Get platform-wide statistics"""
-    try:
-        conn = await get_db_connection()
-        
-        # Get various stats
-        stats_queries = {
-            'active_opportunities': "SELECT COUNT(*) FROM arbitrage_opportunities WHERE status = 'active'",
-            'total_venues': "SELECT COUNT(*) FROM venues WHERE status = 'active'",
-            'total_markets': "SELECT COUNT(*) FROM markets WHERE status = 'active'",
-            'avg_spread': "SELECT AVG(net_spread_pct) FROM arbitrage_opportunities WHERE status = 'active'",
-            'total_volume': "SELECT SUM(max_tradable_amount) FROM arbitrage_opportunities WHERE status = 'active'"
-        }
-        
-        stats = {}
-        for key, query in stats_queries.items():
-            result = await conn.fetchval(query)
-            if result is not None:
-                if hasattr(result, '__float__'):
-                    stats[key] = round(float(result), 2)
-                else:
-                    stats[key] = result
-            else:
-                stats[key] = 0
-        
-        await conn.close()
-        
-        return {
-            "stats": stats,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
-
-# Error handlers
+# Enhanced error handlers with CORS support
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
     return JSONResponse(
         status_code=404,
-        content={"detail": "Endpoint not found", "path": str(request.url)}
+        content={
+            "detail": "Endpoint not found", 
+            "path": str(request.url.path),
+            "method": request.method,
+            "available_endpoints": [
+                "/health",
+                "/api/v1/opportunities",
+                "/api/v1/venues",
+                "/api/v1/markets",
+                "/api/v1/stats"
+            ]
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
     )
 
 @app.exception_handler(500)
 async def internal_error_handler(request, exc):
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "timestamp": datetime.utcnow().isoformat()}
+        content={
+            "detail": "Internal server error", 
+            "timestamp": datetime.utcnow().isoformat(),
+            "path": str(request.url.path),
+            "method": request.method
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
     )
+
+# Add startup event to test database connection
+@app.on_event("startup")
+async def startup_event():
+    """Test database connection on startup"""
+    try:
+        if DATABASE_URL:
+            conn = await get_db_connection()
+            await conn.close()
+            print("✅ Database connection successful")
+            print(f"✅ CORS configured for {len(origins)} origins")
+        else:
+            print("⚠️  No database URL configured")
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+
+# Add middleware to log requests for debugging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests for debugging CORS issues"""
+    print(f"📥 {request.method} {request.url.path} from {request.headers.get('origin', 'unknown')}")
+    
+    if request.method == "OPTIONS": print(f"🔄 CORS preflight request detected")
+        
+    response = await call_next(request)
+    
+    print(f"📤 Response: {response.status_code}")
+    return response
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
