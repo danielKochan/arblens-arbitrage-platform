@@ -12,7 +12,8 @@ import Button from '../../components/ui/Button';
 import { useAuth } from '../../contexts/AuthContext';
 import { useDataIngestion } from '../../contexts/DataIngestionContext';
 import DataIngestionStatus from '../../components/DataIngestionStatus';
-import { arbitrageService, venueService, healthService } from '../../utils/backendServices';
+import { arbitrageService } from '../../utils/backendServices';
+import checkBackendHealth from '../../utils/backendHealthCheck';
 
 const ArbitrageCalculator = () => {
   const { notifications, addNotification, dismissNotification } = useNotifications();
@@ -141,81 +142,37 @@ const ArbitrageCalculator = () => {
     return `${Math.floor(diffInMinutes / 1440)} days ago`;
   };
 
-  // Updated data loading with data ingestion context
   useEffect(() => {
-    let isMounted = true;
-    
-    const loadInitialData = async () => {
+    const initializeData = async () => {
       try {
         setLoading(true);
-        setError('');
-        setConnectionStatus('checking');
         
-        // Check backend health first
-        const backendHealthy = await healthService?.checkBackendHealth();
+        // Test backend connectivity first
+        const healthCheck = await checkBackendHealth();
+        console.log('Backend health:', healthCheck);
         
-        if (!isMounted) return;
-        
-        if (backendHealthy) {
-          setConnectionStatus('backend');
-        } else {
-          setConnectionStatus('fallback');
-          addNotification({
-            type: 'warning',
-            title: 'Backend Unavailable',
-            message: 'Using Supabase database with live data ingestion for arbitrage data.',
-            autoClose: 4000
-          });
+        if (healthCheck?.status === 'error') {
+          setError(`Backend connection failed: ${healthCheck?.message}`);
+          return;
         }
-        
-        // Load venues
-        const venuesData = await venueService?.getActiveVenues();
-        if (isMounted) {
-          setVenues(venuesData || []);
-        }
-        
-        // Use opportunities from data ingestion context
-        const opportunitiesData = contextOpportunities?.length > 0 ? 
-          contextOpportunities?.map(transformContextOpportunity) : 
-          await loadFallbackOpportunities();
-        
-        if (isMounted) {
-          setOpportunities(opportunitiesData);
-          
-          if (opportunitiesData?.length > 0) {
-            setSelectedOpportunity(opportunitiesData?.[0]);
-            setConnectionStatus(backendHealthy ? 'backend' : 'ingestion');
-          } else {
-            setError('No active arbitrage opportunities found. Data ingestion may be initializing.');
-          }
-        }
+
+        // Load initial data
+        await Promise.all([
+          loadOpportunities(),
+          loadVenues(),
+          loadMarkets()
+        ]);
         
       } catch (error) {
-        if (!isMounted) return;
-        
-        const errorMessage = error?.message || 'Failed to load arbitrage data';
-        setError(errorMessage);
-        setConnectionStatus('failed');
-        
-        addNotification({
-          type: 'error',
-          title: 'Data Loading Failed',
-          message: errorMessage,
-          autoClose: 8000
-        });
+        console.error('Initialization error:', error);
+        setError(error?.message);
       } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+        setLoading(false);
       }
     };
-    
-    loadInitialData();
-    
-    return () => {
-      isMounted = false;
-    };
-  }, [contextOpportunities, addNotification]);
+
+    initializeData();
+  }, []);
 
   // Load opportunities function with better error handling
   const loadOpportunities = async () => {
@@ -236,6 +193,26 @@ const ArbitrageCalculator = () => {
       }
     } catch (error) {
       console.warn('Failed to refresh opportunities:', error?.message);
+    }
+  };
+
+  // Load venues function
+  const loadVenues = async () => {
+    try {
+      const data = await arbitrageService?.getVenues();
+      setVenues(data || []);
+    } catch (error) {
+      console.warn('Failed to load venues:', error?.message);
+    }
+  };
+
+  // Load markets function
+  const loadMarkets = async () => {
+    try {
+      // This function can be implemented when market data is needed
+      console.log('Loading markets...');
+    } catch (error) {
+      console.warn('Failed to load markets:', error?.message);
     }
   };
 

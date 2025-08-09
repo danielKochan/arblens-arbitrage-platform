@@ -72,47 +72,56 @@ async def handle_options():
         }
     )
 
-# Database connection with better error handling
+# Enhanced database connection with better error logging
 DATABASE_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
 
 async def get_db_connection():
     """Get database connection with enhanced error handling"""
     if not DATABASE_URL:
+        print("❌ No database URL found. Checking environment variables...")
+        print(f"SUPABASE_DB_URL: {os.getenv('SUPABASE_DB_URL', 'NOT SET')}")
+        print(f"DATABASE_URL: {os.getenv('DATABASE_URL', 'NOT SET')}")
         raise HTTPException(
             status_code=500, 
             detail="Database configuration missing. Please set SUPABASE_DB_URL environment variable."
         )
     
     try:
+        print(f"🔗 Attempting database connection...")
         # Add connection timeout and better error handling
         connection = await asyncpg.connect(
             DATABASE_URL,
-            timeout=15.0,
+            timeout=30.0,  # Increased timeout
             server_settings={
                 'application_name': 'arblens_api'
             }
         )
         
         # Test the connection
-        await connection.execute("SELECT 1")
+        test_result = await connection.fetchval("SELECT 1")
+        print(f"✅ Database connection successful. Test query result: {test_result}")
         return connection
         
     except asyncpg.InvalidAuthorizationSpecificationError as e:
+        print(f"❌ Database authentication failed: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Database authentication failed. Check your Supabase connection string and credentials: {str(e)}"
         )
     except asyncpg.InvalidCatalogNameError as e:
+        print(f"❌ Database not found: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Database not found. Check your Supabase project URL and database name: {str(e)}"
         )
     except asyncpg.PostgresConnectionError as e:
+        print(f"❌ PostgreSQL connection error: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Cannot connect to Supabase database. Check network connectivity and Supabase status: {str(e)}"
         )
     except Exception as e:
+        print(f"❌ Unexpected database error: {str(e)}")
         raise HTTPException(
             status_code=500, 
             detail=f"Database connection failed: {str(e)}"
