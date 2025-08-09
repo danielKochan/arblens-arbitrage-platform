@@ -1,12 +1,18 @@
 import React from "react";
-import { AuthProvider } from "./contexts/AuthContext";
-import Routes from "./Routes";
+import ErrorBoundary from './components/ErrorBoundary';
+import Routes from './Routes';
+import { AuthProvider } from './contexts/AuthContext';
+import { DataIngestionProvider } from './contexts/DataIngestionContext';
 
 function App() {
   return (
-    <AuthProvider>
-      <Routes />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <DataIngestionProvider>
+          <Routes />
+        </DataIngestionProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

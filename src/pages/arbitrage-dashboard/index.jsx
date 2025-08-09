@@ -6,10 +6,28 @@ import FilterSidebar from './components/FilterSidebar';
 import DashboardToolbar from './components/DashboardToolbar';
 import { OpportunityTable } from './components/OpportunityTable';
 import OpportunityDetailModal from './components/OpportunityDetailModal';
-import { arbitrageService, subscriptionService } from '../../utils/backendServices';
-import supabaseServices from '../../utils/supabaseServices';
+import { arbitrageService } from '../../utils/backendServices';
+
+import { useAuth } from '../../contexts/AuthContext';
+import { useDataIngestion } from '../../contexts/DataIngestionContext';
+import DataIngestionStatus from '../../components/DataIngestionStatus';
+import Button from '../../components/ui/Button';
+import Icon from '../../components/AppIcon';
+
+// Mock venue service for demonstration
+const venueService = {
+  getActiveVenues: async () => {
+    return [
+      { id: 1, name: 'Venue A' },
+      { id: 2, name: 'Venue B' }
+    ];
+  }
+};
 
 const ArbitrageDashboard = () => {
+  const { user, userProfile } = useAuth();
+  const { notifications, addNotification, dismissNotification } = useNotifications();
+  const { opportunities: liveOpportunities, isLoading: dataIngestionLoading, refresh: refreshDataIngestion, dataStats } = useDataIngestion();
   const [isFilterSidebarCollapsed, setIsFilterSidebarCollapsed] = useState(false);
   const [selectedOpportunity, setSelectedOpportunity] = useState(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
@@ -18,9 +36,8 @@ const ArbitrageDashboard = () => {
   const [sortConfig, setSortConfig] = useState({ key: 'netSpread', direction: 'desc' });
   const [opportunities, setOpportunities] = useState([]);
   const [error, setError] = useState('');
-  
-  const { notifications, addNotification, dismissNotification } = useNotifications();
-
+  const [availableVenues, setAvailableVenues] = useState([]);
+  const [connectionStatus, setConnectionStatus] = useState('initial');
   const [filters, setFilters] = useState({
     venues: [],
     categories: [],
@@ -30,6 +47,52 @@ const ArbitrageDashboard = () => {
     minConfidence: 0,
     searchTerm: ''
   });
+
+  const { opportunities: filteredOpportunities, isLoading: filteredOpportunitiesLoading } = useMemo(() => {
+    return {
+      opportunities: opportunities,
+      isLoading: isLoading
+    };
+  }, [opportunities, isLoading]);
+
+  const [statistics, setStatistics] = useState({
+    averageSpread: 0,
+    totalLiquidity: 0
+  });
+
+  // Update statistics function
+  const updateStatistics = (opportunitiesData) => {
+    if (!opportunitiesData || opportunitiesData.length === 0) {
+      setStatistics({ averageSpread: 0, totalLiquidity: 0 });
+      return;
+    }
+    
+    const avgSpread = opportunitiesData.reduce((sum, opp) => sum + (opp?.netSpread || 0), 0) / opportunitiesData.length;
+    const totalLiq = opportunitiesData.reduce((sum, opp) => sum + (opp?.liquidity || 0), 0);
+    
+    setStatistics({
+      averageSpread: avgSpread,
+      totalLiquidity: totalLiq
+    });
+  };
+
+  // Transform live opportunities from data ingestion context
+  const transformLiveOpportunity = (liveOpp) => {
+    return {
+      id: liveOpp?.id,
+      market: liveOpp?.market?.title || 'Unknown Market',
+      category: liveOpp?.market?.category || 'Other',
+      venueA: liveOpp?.venues?.a?.name || 'Venue A',
+      venueB: liveOpp?.venues?.b?.name || 'Venue B',
+      spread: liveOpp?.profitability?.netSpread || 0,
+      expectedReturn: liveOpp?.profitability?.expectedProfitUsd || 0,
+      liquidity: Math.min(liveOpp?.venues?.a?.liquidity || 0, liveOpp?.venues?.b?.liquidity || 0),
+      riskLevel: liveOpp?.metadata?.riskLevel || 'medium',
+      confidence: liveOpp?.metadata?.confidence || 70,
+      lastUpdated: liveOpp?.metadata?.updatedAt || new Date()?.toISOString(),
+      isLive: true
+    };
+  };
 
   // Transform Supabase opportunity data to match UI expectations
   const transformSupabaseOpportunity = (supabaseOpp) => {
@@ -81,51 +144,81 @@ const ArbitrageDashboard = () => {
     };
   };
 
-  // Load initial opportunities with Supabase fallback
+  // Handle refresh with improved fallback
+  const handleRefresh = async () => {
+    try {
+      setIsLoading(true);
+      
+      // Refresh the data ingestion system first
+      await refreshDataIngestion();
+      
+      addNotification({
+        type: 'success',
+        title: 'Data Refreshed',
+        message: `Market data updated. Found ${liveOpportunities?.length} live opportunities.`,
+        autoClose: 3000
+      });
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Refresh Failed',
+        message: error?.message || 'Failed to refresh market data',
+        autoClose: 4000
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Enhanced data loading with live data ingestion
   useEffect(() => {
     let isMounted = true;
     
-    const loadOpportunities = async () => {
+    const loadDashboardData = async () => {
       try {
         setIsLoading(true);
         setError('');
         
-        // Try backend first, fallback to Supabase automatically
-        let data;
-        try {
-          data = await arbitrageService?.getOpportunities({
-            min_spread: 1.0,
-            min_liquidity: 500,
-            limit: 100,
-            status: 'active'
-          });
-          // Transform backend data
-          let transformedOpportunities = data?.map(transformBackendOpportunity) || [];
-          setOpportunities(transformedOpportunities);
-        } catch (backendError) {
-          // If backend fails, use Supabase directly
-          console.warn('Backend failed, using Supabase directly:', backendError?.message);
-          data = await supabaseServices?.arbitrageService?.getOpportunities({
-            min_spread: 1.0,
-            min_liquidity: 500
-          });
-          // Transform Supabase data
-          let transformedOpportunities = data?.map(transformSupabaseOpportunity) || [];
-          setOpportunities(transformedOpportunities);
+        // Load venues first
+        const venuesData = await venueService?.getActiveVenues();
+        if (isMounted) {
+          setAvailableVenues(venuesData || []);
         }
+
+        // Use live opportunities from data ingestion context
+        let opportunitiesData = [];
         
-        if (!isMounted) return;
-        
-        setLastUpdated(new Date());
-        
+        if (liveOpportunities?.length > 0) {
+          // Transform live opportunities to dashboard format
+          opportunitiesData = liveOpportunities?.map(transformLiveOpportunity);
+          setConnectionStatus('live_ingestion');
+        } else {
+          // Fallback to backend/supabase
+          const backendData = await arbitrageService?.getOpportunities({
+            min_spread: filters?.minSpread || 0.5,
+            min_liquidity: filters?.minLiquidity || 100,
+            venues: filters?.selectedVenues?.length > 0 ? filters?.selectedVenues : undefined,
+            category: filters?.category || undefined,
+            limit: 100
+          });
+          
+          opportunitiesData = backendData?.map(transformBackendOpportunity) || [];
+          setConnectionStatus('backend_fallback');
+        }
+
+        if (isMounted) {
+          setOpportunities(opportunitiesData);
+          updateStatistics(opportunitiesData);
+        }
+
       } catch (error) {
         if (!isMounted) return;
         
-        setError(error?.message || 'Failed to load opportunities');
+        setError(error?.message || 'Failed to load dashboard data');
         addNotification({
           type: 'error',
-          title: 'Loading Error', 
-          message: error?.message || 'Failed to connect to data source',
+          title: 'Data Loading Error',
+          message: error?.message || 'Failed to load arbitrage data',
           autoClose: 5000
         });
       } finally {
@@ -134,44 +227,13 @@ const ArbitrageDashboard = () => {
         }
       }
     };
-    
-    loadOpportunities();
+
+    loadDashboardData();
     
     return () => {
       isMounted = false;
     };
-  }, [addNotification]);
-
-  // Real-time subscription for opportunities
-  useEffect(() => {
-    // Always use Supabase for real-time subscriptions
-    const unsubscribe = supabaseServices?.subscriptionService?.subscribeToOpportunities((payload) => {
-      if (payload?.eventType === 'INSERT' && payload?.new) {
-        const newOpportunity = transformSupabaseOpportunity(payload?.new);
-        setOpportunities(prev => [newOpportunity, ...prev?.slice(0, 49)]); // Keep 50 most recent
-        setLastUpdated(new Date());
-        
-        // Show notification for high-confidence opportunities
-        if (newOpportunity?.netSpread > 3 && newOpportunity?.confidence > 85) {
-          addNotification({
-            type: 'opportunity',
-            title: 'New High-Value Opportunity',
-            message: `${newOpportunity?.netSpread?.toFixed(2)}% spread on ${newOpportunity?.market}`,
-            data: newOpportunity,
-            autoClose: 8000
-          });
-        }
-      } else if (payload?.eventType === 'UPDATE' && payload?.new) {
-        const updatedOpportunity = transformSupabaseOpportunity(payload?.new);
-        setOpportunities(prev => 
-          prev?.map(opp => opp?.id === updatedOpportunity?.id ? updatedOpportunity : opp)
-        );
-        setLastUpdated(new Date());
-      }
-    });
-
-    return unsubscribe;
-  }, [addNotification]);
+  }, [liveOpportunities, filters, addNotification]);
 
   // Filter and sort opportunities
   const filteredAndSortedOpportunities = useMemo(() => {
@@ -279,71 +341,25 @@ const ArbitrageDashboard = () => {
   };
 
   // Handle refresh with improved fallback
-  const handleRefresh = async () => {
+  const handleRefreshData = async () => {
     try {
       setIsLoading(true);
-      setError('');
       
-      let data;
-      let transformedOpportunities;
+      // Refresh the data ingestion system first
+      await refreshDataIngestion();
       
-      try {
-        // Try backend first
-        data = await arbitrageService?.getOpportunities({
-          min_spread: 1.0,
-          min_liquidity: 500,
-          limit: 100,
-          status: 'active'
-        });
-        transformedOpportunities = data?.map(transformBackendOpportunity) || [];
-      } catch (backendError) {
-        // Fallback to Supabase
-        console.warn('Backend refresh failed, using Supabase:', backendError?.message);
-        data = await supabaseServices?.arbitrageService?.getOpportunities({
-          min_spread: 1.0,
-          min_liquidity: 500
-        });
-        transformedOpportunities = data?.map(transformSupabaseOpportunity) || [];
-      }
-      
-      setOpportunities(transformedOpportunities);
-      setLastUpdated(new Date());
-      
-      // Add success notification
       addNotification({
         type: 'success',
         title: 'Data Refreshed',
-        message: `Loaded ${transformedOpportunities?.length} live arbitrage opportunities`,
+        message: `Market data updated. Found ${liveOpportunities?.length} live opportunities.`,
         autoClose: 3000
       });
-      
-      // Check for high-confidence opportunities
-      const highConfidenceOpps = transformedOpportunities?.filter(opp => 
-        opp?.netSpread > 3 && opp?.confidence > 85
-      );
-      
-      if (highConfidenceOpps?.length > 0) {
-        addNotification({
-          type: 'opportunity',
-          title: 'High-Confidence Opportunities',
-          message: `${highConfidenceOpps?.length} opportunities with >3% spread available`,
-          data: {
-            count: highConfidenceOpps?.length,
-            maxSpread: Math.max(...highConfidenceOpps?.map(o => o?.netSpread))
-          },
-          action: {
-            label: 'View Opportunities'
-          }
-        });
-      }
-      
     } catch (error) {
-      setError(error?.message || 'Failed to refresh data');
       addNotification({
         type: 'error',
         title: 'Refresh Failed',
-        message: error?.message || 'Could not connect to any data source',
-        autoClose: 5000
+        message: error?.message || 'Failed to refresh market data',
+        autoClose: 4000
       });
     } finally {
       setIsLoading(false);
@@ -389,81 +405,174 @@ const ArbitrageDashboard = () => {
     <div className="min-h-screen bg-background">
       <Header />
       <NavigationTabs />
-      <div className="bg-success/10 border-b border-success/20 px-6 py-2">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <div className="w-2 h-2 rounded-full bg-success animate-pulse"></div>
-            <span className="text-sm font-medium text-success">
-              Connected to Live Backend
-            </span>
-            <span className="text-xs text-text-secondary">
-              • https://arblens-backend.onrender.com • {opportunities?.length || 0} opportunities
-            </span>
-          </div>
-          <div className="text-xs text-text-secondary">
-            Last updated: {lastUpdated?.toLocaleTimeString()}
-          </div>
-        </div>
-      </div>
-      <div className="flex h-[calc(100vh-8rem)]">
-        {/* Filter Sidebar */}
-        <div className={`${isFilterSidebarCollapsed ? 'hidden lg:hidden' : 'block'} flex-shrink-0`}>
-          <FilterSidebar
-            filters={filters}
-            onFiltersChange={handleFiltersChange}
-            isCollapsed={isFilterSidebarCollapsed}
-            onToggleCollapse={() => setIsFilterSidebarCollapsed(!isFilterSidebarCollapsed)}
-          />
-        </div>
-
-        {/* Main Content */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <DashboardToolbar
-            activeFilters={filters}
-            onRemoveFilter={handleRemoveFilter}
-            onClearAllFilters={handleClearAllFilters}
-            resultsCount={filteredAndSortedOpportunities?.length}
-            isLoading={isLoading}
-            onRefresh={handleRefresh}
-            onExport={handleExport}
-            lastUpdated={lastUpdated}
-          />
-
-          <div className="flex-1 overflow-auto p-6">
-            {error && (
-              <div className="bg-error/10 border border-error/20 rounded-lg p-4 mb-6 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-error">Backend Connection Error</p>
-                  <p className="text-xs text-text-secondary mt-1">{error}</p>
-                </div>
-                <button
-                  onClick={handleRefresh}
-                  className="px-3 py-1 text-xs bg-error text-white rounded hover:bg-error/90"
-                >
-                  Retry
-                </button>
+      <NotificationToast 
+        notifications={notifications}
+        onDismiss={dismissNotification}
+      />
+      <main className="pt-32 pb-16 px-6">
+        <div className="max-w-7xl mx-auto">
+          {/* Enhanced Header with Live Data Status */}
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h1 className="text-3xl font-heading font-bold text-card-foreground mb-2">
+                Arbitrage Dashboard
+              </h1>
+              <p className="text-text-secondary">
+                Monitor live arbitrage opportunities across prediction markets
+              </p>
+            </div>
+            <div className="flex items-center space-x-3">
+              <div className="text-right mr-4">
+                <p className="text-sm font-medium text-card-foreground">
+                  {filteredOpportunities?.length} Live Opportunities
+                </p>
+                <p className="text-xs text-text-secondary">
+                  {connectionStatus === 'live_ingestion' ? 'Real-time data feed active' : 
+                   connectionStatus === 'backend_fallback'? 'Using backend data' : 'Connecting to data sources...'}
+                </p>
               </div>
-            )}
-            
-            <OpportunityTable
-              opportunities={filteredAndSortedOpportunities}
-              onSort={handleSort}
-              sortConfig={sortConfig}
-              onRowClick={handleRowClick}
+              <Button
+                variant="default"
+                onClick={handleRefreshData}
+                loading={isLoading || dataIngestionLoading}
+                iconName="RefreshCw"
+                iconPosition="left"
+              >
+                Refresh Data
+              </Button>
+            </div>
+          </div>
+
+          {/* Data Ingestion Status */}
+          <DataIngestionStatus 
+            showDetails={true}
+            className="mb-6"
+            onRefresh={(result) => {
+              if (result?.success) {
+                addNotification({
+                  type: 'success',
+                  title: 'Market Data Updated',
+                  message: 'Latest arbitrage opportunities have been loaded.',
+                  autoClose: 3000
+                });
+              }
+            }}
+          />
+
+          {/* Enhanced Statistics with Live Data Metrics */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-text-secondary">Active Opportunities</h3>
+                <Icon name="TrendingUp" size={16} className="text-success" />
+              </div>
+              <p className="text-2xl font-bold text-card-foreground">
+                {dataStats?.activeOpportunities || filteredOpportunities?.length || 0}
+              </p>
+              <p className="text-xs text-text-secondary mt-1">
+                {connectionStatus === 'live_ingestion' ? 'Live feed' : 'Historical data'}
+              </p>
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-text-secondary">Average Spread</h3>
+                <Icon name="Target" size={16} className="text-info" />
+              </div>
+              <p className="text-2xl font-bold text-card-foreground">
+                {dataStats?.avgSpread ? `${dataStats?.avgSpread?.toFixed(2)}%` : 
+                 statistics?.averageSpread ? `${statistics?.averageSpread?.toFixed(2)}%` : '0.00%'}
+              </p>
+              <p className="text-xs text-text-secondary mt-1">Across all venues</p>
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-text-secondary">Total Volume</h3>
+                <Icon name="DollarSign" size={16} className="text-warning" />
+              </div>
+              <p className="text-2xl font-bold text-card-foreground">
+                ${dataStats?.totalVolume ? 
+                  (dataStats?.totalVolume / 1000)?.toFixed(0) + 'K' : 
+                  statistics?.totalLiquidity ? 
+                  (statistics?.totalLiquidity / 1000)?.toFixed(0) + 'K' : '0'}
+              </p>
+              <p className="text-xs text-text-secondary mt-1">Available liquidity</p>
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-medium text-text-secondary">Active Markets</h3>
+                <Icon name="Globe" size={16} className="text-secondary" />
+              </div>
+              <p className="text-2xl font-bold text-card-foreground">
+                {dataStats?.activeMarkets || availableVenues?.length || 0}
+              </p>
+              <p className="text-xs text-text-secondary mt-1">
+                Across {dataStats?.totalVenues || availableVenues?.length || 0} venues
+              </p>
+            </div>
+          </div>
+
+          {/* Filter Sidebar */}
+          <div className={`${isFilterSidebarCollapsed ? 'hidden lg:hidden' : 'block'} flex-shrink-0`}>
+            <FilterSidebar
+              filters={filters}
+              onFiltersChange={handleFiltersChange}
+              isCollapsed={isFilterSidebarCollapsed}
+              onToggleCollapse={() => setIsFilterSidebarCollapsed(!isFilterSidebarCollapsed)}
             />
           </div>
-        </div>
 
-        {/* Collapsed Filter Toggle */}
-        {isFilterSidebarCollapsed && (
-          <FilterSidebar
-            filters={filters}
-            onFiltersChange={handleFiltersChange}
-            isCollapsed={true}
-            onToggleCollapse={() => setIsFilterSidebarCollapsed(false)}
-          />
-        )}
-      </div>
+          {/* Main Content */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <DashboardToolbar
+              activeFilters={filters}
+              onRemoveFilter={handleRemoveFilter}
+              onClearAllFilters={handleClearAllFilters}
+              resultsCount={filteredAndSortedOpportunities?.length}
+              isLoading={isLoading}
+              onRefresh={handleRefresh}
+              onExport={handleExport}
+              lastUpdated={lastUpdated}
+            />
+
+            <div className="flex-1 overflow-auto p-6">
+              {error && (
+                <div className="bg-error/10 border border-error/20 rounded-lg p-4 mb-6 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-error">Backend Connection Error</p>
+                    <p className="text-xs text-text-secondary mt-1">{error}</p>
+                  </div>
+                  <button
+                    onClick={handleRefresh}
+                    className="px-3 py-1 text-xs bg-error text-white rounded hover:bg-error/90"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              
+              <OpportunityTable
+                opportunities={filteredAndSortedOpportunities}
+                onSort={handleSort}
+                sortConfig={sortConfig}
+                onRowClick={handleRowClick}
+              />
+            </div>
+          </div>
+
+          {/* Collapsed Filter Toggle */}
+          {isFilterSidebarCollapsed && (
+            <FilterSidebar
+              filters={filters}
+              onFiltersChange={handleFiltersChange}
+              isCollapsed={true}
+              onToggleCollapse={() => setIsFilterSidebarCollapsed(false)}
+            />
+          )}
+        </div>
+      </main>
       {/* Opportunity Detail Modal */}
       <OpportunityDetailModal
         opportunity={selectedOpportunity}

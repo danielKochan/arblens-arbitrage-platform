@@ -10,18 +10,22 @@ import ScenarioAnalysis from './components/ScenarioAnalysis';
 import Icon from '../../components/AppIcon';
 import Button from '../../components/ui/Button';
 import { useAuth } from '../../contexts/AuthContext';
-import { arbitrageService, venueService, subscriptionService, healthService } from '../../utils/backendServices';
+import { useDataIngestion } from '../../contexts/DataIngestionContext';
+import DataIngestionStatus from '../../components/DataIngestionStatus';
+import { arbitrageService, venueService, healthService } from '../../utils/backendServices';
 
 const ArbitrageCalculator = () => {
   const { notifications, addNotification, dismissNotification } = useNotifications();
   const { user, userProfile } = useAuth();
+  const { opportunities: contextOpportunities, isLoading: dataIngestionLoading, refresh: refreshDataIngestion } = useDataIngestion();
+  
   const [isAdvancedMode, setIsAdvancedMode] = useState(false);
   const [selectedOpportunity, setSelectedOpportunity] = useState(null);
   const [opportunities, setOpportunities] = useState([]);
   const [venues, setVenues] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState('checking'); // 'checking', 'backend', 'fallback', 'failed'
+  const [connectionStatus, setConnectionStatus] = useState('checking');
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [calculationInputs, setCalculationInputs] = useState({
     positionSize: '1000',
@@ -76,6 +80,53 @@ const ArbitrageCalculator = () => {
     };
   };
 
+  // Transform context opportunities to UI format
+  const transformContextOpportunity = (contextOpp) => {
+    return {
+      id: contextOpp?.id,
+      market: contextOpp?.market?.title || 'Market Pair',
+      category: contextOpp?.market?.category || 'Unknown',
+      lastUpdate: getTimeAgo(new Date()),
+      isLive: true,
+      venueA: {
+        name: contextOpp?.venues?.a?.name || 'Venue A',
+        yesPrice: contextOpp?.venues?.a?.price * 100,
+        noPrice: (1 - contextOpp?.venues?.a?.price) * 100,
+        liquidity: contextOpp?.venues?.a?.liquidity || 0
+      },
+      venueB: {
+        name: contextOpp?.venues?.b?.name || 'Venue B',
+        yesPrice: contextOpp?.venues?.b?.price * 100,
+        noPrice: (1 - contextOpp?.venues?.b?.price) * 100,
+        liquidity: contextOpp?.venues?.b?.liquidity || 0
+      },
+      grossSpread: contextOpp?.profitability?.grossSpread || 0,
+      netSpread: contextOpp?.profitability?.netSpread || 0,
+      confidence: contextOpp?.metadata?.confidence || 85,
+      maxTradableAmount: contextOpp?.profitability?.maxTradableAmount || 0,
+      riskLevel: contextOpp?.metadata?.riskLevel || 'medium',
+      expectedProfitUsd: contextOpp?.profitability?.expectedProfitUsd || 0,
+      expectedProfitPct: contextOpp?.profitability?.netSpread || 0
+    };
+  };
+
+  // Fallback to backend/supabase if context has no data
+  const loadFallbackOpportunities = async () => {
+    try {
+      const data = await arbitrageService?.getOpportunities({
+        min_spread: 1.0,
+        min_liquidity: 500,
+        limit: 50,
+        status: 'active'
+      });
+      
+      return data?.map(transformBackendOpportunity) || [];
+    } catch (error) {
+      console.warn('Fallback opportunity loading failed:', error?.message);
+      return [];
+    }
+  };
+
   // Helper function to format time ago
   const getTimeAgo = (timestamp) => {
     if (!timestamp) return 'Unknown';
@@ -90,12 +141,11 @@ const ArbitrageCalculator = () => {
     return `${Math.floor(diffInMinutes / 1440)} days ago`;
   };
 
-  // Load initial data with improved error handling and connection management
+  // Updated data loading with data ingestion context
   useEffect(() => {
     let isMounted = true;
-    let retryTimeoutId = null;
     
-    const loadInitialData = async (attempt = 1) => {
+    const loadInitialData = async () => {
       try {
         setLoading(true);
         setError('');
@@ -113,57 +163,31 @@ const ArbitrageCalculator = () => {
           addNotification({
             type: 'warning',
             title: 'Backend Unavailable',
-            message: 'Using Supabase database for live arbitrage data.',
+            message: 'Using Supabase database with live data ingestion for arbitrage data.',
             autoClose: 4000
           });
         }
         
-        // Load venues and opportunities with timeout protection
-        const dataPromises = [
-          Promise.race([
-            venueService?.getActiveVenues(),
-            new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Venue service timeout')), 10000)
-            )
-          ]),
-          Promise.race([
-            arbitrageService?.getOpportunities({
-              min_spread: 1.0,
-              min_liquidity: 500,
-              limit: 50,
-              status: 'active'
-            }),
-            new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Opportunities service timeout')), 10000)
-            )
-          ])
-        ];
-        
-        const [venuesData, opportunitiesData] = await Promise.allSettled(dataPromises);
-        
-        if (!isMounted) return;
-        
-        // Handle venues data
-        if (venuesData?.status === 'fulfilled') {
-          setVenues(venuesData?.value || []);
-        } else {
-          console.warn('Failed to load venues:', venuesData?.reason?.message);
+        // Load venues
+        const venuesData = await venueService?.getActiveVenues();
+        if (isMounted) {
+          setVenues(venuesData || []);
         }
         
-        // Handle opportunities data
-        if (opportunitiesData?.status === 'fulfilled') {
-          const transformedOpportunities = opportunitiesData?.value?.map(transformBackendOpportunity) || [];
-          setOpportunities(transformedOpportunities);
+        // Use opportunities from data ingestion context
+        const opportunitiesData = contextOpportunities?.length > 0 ? 
+          contextOpportunities?.map(transformContextOpportunity) : 
+          await loadFallbackOpportunities();
+        
+        if (isMounted) {
+          setOpportunities(opportunitiesData);
           
-          // Select first opportunity if available
-          if (transformedOpportunities?.length > 0) {
-            setSelectedOpportunity(transformedOpportunities?.[0]);
-            setConnectionStatus(backendHealthy ? 'backend' : 'fallback');
+          if (opportunitiesData?.length > 0) {
+            setSelectedOpportunity(opportunitiesData?.[0]);
+            setConnectionStatus(backendHealthy ? 'backend' : 'ingestion');
           } else {
-            setError('No active arbitrage opportunities found');
+            setError('No active arbitrage opportunities found. Data ingestion may be initializing.');
           }
-        } else {
-          throw new Error(opportunitiesData?.reason?.message || 'Failed to load opportunities');
         }
         
       } catch (error) {
@@ -173,35 +197,12 @@ const ArbitrageCalculator = () => {
         setError(errorMessage);
         setConnectionStatus('failed');
         
-        // Implement exponential backoff retry for critical failures
-        if (attempt < 3 && (
-          errorMessage?.includes('timeout') ||
-          errorMessage?.includes('Failed to fetch') ||
-          errorMessage?.includes('NetworkError')
-        )) {
-          const retryDelay = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
-          setRetryAttempt(attempt);
-          
-          addNotification({
-            type: 'warning',
-            title: `Connection Attempt ${attempt} Failed`,
-            message: `Retrying in ${retryDelay / 1000} seconds...`,
-            autoClose: retryDelay - 500
-          });
-          
-          retryTimeoutId = setTimeout(() => {
-            if (isMounted) {
-              loadInitialData(attempt + 1);
-            }
-          }, retryDelay);
-        } else {
-          addNotification({
-            type: 'error',
-            title: 'Connection Failed',
-            message: errorMessage,
-            autoClose: 8000
-          });
-        }
+        addNotification({
+          type: 'error',
+          title: 'Data Loading Failed',
+          message: errorMessage,
+          autoClose: 8000
+        });
       } finally {
         if (isMounted) {
           setLoading(false);
@@ -213,37 +214,8 @@ const ArbitrageCalculator = () => {
     
     return () => {
       isMounted = false;
-      if (retryTimeoutId) {
-        clearTimeout(retryTimeoutId);
-      }
     };
-  }, [addNotification]);
-
-  // Real-time subscription with improved error handling
-  useEffect(() => {
-    if (connectionStatus === 'failed') return;
-    
-    let unsubscribe = null;
-    
-    try {
-      unsubscribe = subscriptionService?.subscribeToOpportunities((payload) => {
-        if (payload?.eventType === 'UPDATE' || payload?.eventType === 'INSERT') {
-          // Debounced refresh to avoid too many calls
-          setTimeout(() => {
-            loadOpportunities();
-          }, 1000);
-        }
-      });
-    } catch (error) {
-      console.warn('Real-time subscription failed:', error?.message);
-    }
-
-    return () => {
-      if (unsubscribe && typeof unsubscribe === 'function') {
-        unsubscribe();
-      }
-    };
-  }, [connectionStatus]);
+  }, [contextOpportunities, addNotification]);
 
   // Load opportunities function with better error handling
   const loadOpportunities = async () => {
@@ -374,14 +346,25 @@ Risk Score: ${calculationResults?.riskScore}/100
     
     try {
       setLoading(true);
-      await loadOpportunities();
       
-      const backendStatus = healthService?.getBackendStatus();
+      // Refresh data ingestion first
+      await refreshDataIngestion();
+      
+      // Then reload local data
+      const opportunitiesData = contextOpportunities?.length > 0 ? 
+        contextOpportunities?.map(transformContextOpportunity) : 
+        await loadFallbackOpportunities();
+      
+      setOpportunities(opportunitiesData);
+      
+      if (opportunitiesData?.length > 0) {
+        setSelectedOpportunity(opportunitiesData?.[0]);
+      }
       
       addNotification({
         type: 'success',
         title: 'Data Refreshed',
-        message: `Updated ${opportunities?.length} opportunities from ${backendStatus?.status === 'healthy' ? 'backend server' : 'Supabase database'}.`,
+        message: `Updated ${opportunitiesData?.length} opportunities from live data ingestion.`,
         autoClose: 3000
       });
     } catch (error) {
@@ -456,7 +439,7 @@ Risk Score: ${calculationResults?.riskScore}/100
     ]
   } : null;
 
-  // Enhanced loading state with better UX
+  // Enhanced loading state with data ingestion info
   if (loading && !selectedOpportunity) {
     return (
       <div className="min-h-screen bg-background">
@@ -466,17 +449,19 @@ Risk Score: ${calculationResults?.riskScore}/100
           <div className="max-w-4xl mx-auto text-center">
             <Icon name="Loader2" size={48} color="var(--color-text-secondary)" className="mx-auto mb-4 animate-spin" />
             <h2 className="text-2xl font-heading font-semibold text-card-foreground mb-2">
-              {connectionStatus === 'checking' ? 'Checking Connection Status' : 'Loading Live Arbitrage Data'}
+              Loading Live Arbitrage Data
             </h2>
             <p className="text-text-secondary mb-6">
-              {connectionStatus === 'checking' ? 'Detecting best data source...' :
+              {dataIngestionLoading ? 'Initializing data ingestion from Polymarket, Kalshi, and Manifold...' :
+               connectionStatus === 'checking' ? 'Detecting best data source...' :
                connectionStatus === 'backend' ? 'Connecting to backend server and fetching real-time opportunities...' :
-               connectionStatus === 'fallback'? 'Backend unavailable, loading data from Supabase database...' : 'Fetching live arbitrage data...'}
+               connectionStatus === 'fallback'? 'Backend unavailable, using live data ingestion...' : 
+               connectionStatus === 'ingestion'? 'Loading fresh arbitrage data from data ingestion system...' : 'Fetching live arbitrage data...'}
             </p>
-            {retryAttempt > 0 && (
-              <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 mb-4">
-                <p className="text-sm text-warning">
-                  Connection attempt {retryAttempt} failed, retrying...
+            {dataIngestionLoading && (
+              <div className="bg-info/10 border border-info/20 rounded-lg p-3 mb-4 max-w-lg mx-auto">
+                <p className="text-sm text-info">
+                  Data ingestion system is fetching real market data from exchanges. This may take a moment...
                 </p>
               </div>
             )}
@@ -486,45 +471,7 @@ Risk Score: ${calculationResults?.riskScore}/100
     );
   }
 
-  // Improved error state with retry options
-  if (error && !selectedOpportunity && connectionStatus === 'failed') {
-    return (
-      <div className="min-h-screen bg-background">
-        <Header />
-        <NavigationTabs />
-        <div className="pt-32 pb-16 px-6">
-          <div className="max-w-4xl mx-auto text-center">
-            <Icon name="AlertCircle" size={48} color="var(--color-error)" className="mx-auto mb-4" />
-            <h2 className="text-2xl font-heading font-semibold text-card-foreground mb-2">
-              Connection Failed
-            </h2>
-            <p className="text-text-secondary mb-4">
-              {error}
-            </p>
-            <div className="bg-muted border border-border rounded-lg p-4 mb-6 text-left max-w-lg mx-auto">
-              <h3 className="font-medium text-card-foreground mb-2">Troubleshooting:</h3>
-              <ul className="text-sm text-text-secondary space-y-1">
-                <li>• Backend server may be temporarily unavailable</li>
-                <li>• Check your internet connection</li>
-                <li>• Supabase database connection may be inactive</li>
-                <li>• Try refreshing in a few minutes</li>
-              </ul>
-            </div>
-            <div className="flex gap-3 justify-center">
-              <Button variant="default" onClick={handleRefreshData} loading={loading}>
-                Retry Connection
-              </Button>
-              <Button variant="outline" onClick={() => window.location.href = '/arbitrage-dashboard'} iconName="ArrowLeft" iconPosition="left">
-                Go to Dashboard
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // No opportunities state with better messaging
+  // Enhanced no opportunities state with data ingestion status
   if (!selectedOpportunity && opportunities?.length === 0 && !loading) {
     return (
       <div className="min-h-screen bg-background">
@@ -537,11 +484,14 @@ Risk Score: ${calculationResults?.riskScore}/100
               No Active Opportunities Available
             </h2>
             <p className="text-text-secondary mb-4">
-              {connectionStatus === 'backend' ? 'The backend server is connected but no arbitrage opportunities are currently available that meet the minimum criteria.': 'Connected to Supabase database but no active arbitrage opportunities found.'}
+              The data ingestion system is running but no arbitrage opportunities are currently available that meet the minimum criteria.
             </p>
             <div className="bg-muted border border-border rounded-lg p-4 mb-6 text-left max-w-lg mx-auto">
               <p className="text-sm text-text-secondary">
                 <strong>Current filters:</strong> Min spread 1.0%, Min liquidity $500
+              </p>
+              <p className="text-sm text-text-secondary mt-2">
+                Data sources: Polymarket, Kalshi, Manifold Markets
               </p>
             </div>
             <div className="flex gap-3 justify-center">
@@ -576,52 +526,28 @@ Risk Score: ${calculationResults?.riskScore}/100
             <span className="text-card-foreground">{selectedOpportunity?.market?.substring(0, 50)}...</span>
           </div>
 
-          {/* Enhanced Connection Status Banner */}
-          <div className={`border rounded-lg p-4 mb-6 flex items-center justify-between ${
-            connectionStatus === 'backend' ? 'bg-success/10 border-success/20' :
-            connectionStatus === 'fallback'? 'bg-warning/10 border-warning/20' : 'bg-muted border-border'
-          }`}>
-            <div className="flex items-center space-x-3">
-              <div className={`w-2 h-2 rounded-full ${
-                connectionStatus === 'backend' ? 'bg-success animate-pulse' :
-                connectionStatus === 'fallback'? 'bg-warning animate-pulse' : 'bg-text-secondary'
-              }`}></div>
-              <div>
-                <p className="text-sm font-medium text-card-foreground">
-                  {connectionStatus === 'backend' ? 'Live Backend Connected' :
-                   connectionStatus === 'fallback'? 'Supabase Database Connected' : 'Data Source Connected'}
-                </p>
-                <p className="text-xs text-text-secondary">
-                  {connectionStatus === 'backend' ? 
-                    `Real-time data from backend server • ${opportunities?.length} live opportunities` :
-                    `Data from Supabase database • ${opportunities?.length} opportunities available`}
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                iconName="RefreshCw"
-                iconPosition="left"
-                onClick={handleRefreshData}
-                loading={loading}
-              >
-                Refresh
-              </Button>
-              {connectionStatus === 'fallback' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  iconName="Wifi"
-                  iconPosition="left"
-                  onClick={() => healthService?.forceHealthCheck()?.then(() => window.location?.reload())}
-                >
-                  Retry Backend
-                </Button>
-              )}
-            </div>
-          </div>
+          {/* Enhanced Data Ingestion Status */}
+          <DataIngestionStatus 
+            showDetails={false}
+            className="mb-6"
+            onRefresh={(result) => {
+              if (result?.success) {
+                addNotification({
+                  type: 'success',
+                  title: 'Data Refreshed',
+                  message: 'Market data has been updated with latest opportunities.',
+                  autoClose: 3000
+                });
+              } else {
+                addNotification({
+                  type: 'error',
+                  title: 'Refresh Failed',
+                  message: result?.error || 'Failed to refresh market data',
+                  autoClose: 4000
+                });
+              }
+            }}
+          />
 
           {/* Opportunity Summary */}
           <OpportunitySummary opportunity={selectedOpportunity} />
